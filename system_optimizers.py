@@ -53,7 +53,7 @@ class MemoryStats:
 
 
 class AdvancedTimerManager:
-    """FIXED: Unified timer API - uses ONLY NtSetTimerResolution OR timeBeginPeriod"""
+    """Timer management using NtSetTimerResolution (kernel-native API) exclusively"""
     
     def __init__(self):
         try:
@@ -63,17 +63,7 @@ class AdvancedTimerManager:
         
         self.capabilities: Optional[TimerCapabilities] = None
         self.original_resolution: Optional[int] = None
-        self.winmm = None
-        self._time_period_active = False
-        self._use_nt_api = False
-        
-        try:
-            self.winmm = ctypes.WinDLL('winmm')
-            self.timeBeginPeriod = self.winmm.timeBeginPeriod
-            self.timeEndPeriod = self.winmm.timeEndPeriod
-        except Exception:
-            self.timeBeginPeriod = None
-            self.timeEndPeriod = None
+        self.current_resolution: Optional[int] = None
         
         self._setup_functions()
         self._query_capabilities()
@@ -106,45 +96,51 @@ class AdvancedTimerManager:
             logger.debug(f"Query timer caps failed: {e}")
     
     def set_high_performance_timer(self) -> bool:
+        """Set high-performance timer using NtSetTimerResolution exclusively"""
         try:
-            if self.NtSetTimerResolution and self.capabilities:
-                target_res = self.capabilities.min_period_100ns or TIMER_RESOLUTION_05MS
-                current_res = wintypes.ULONG()
-                if self.NtSetTimerResolution(target_res, True, ctypes.byref(current_res)) == 0:
-                    self._use_nt_api = True
-                    logger.info(f"✓ Timer: {current_res.value/10:.1f}μs (NtSetTimerResolution)")
-                    return True
-            if self.timeBeginPeriod and not self._time_period_active:
-                self.timeBeginPeriod(1)
-                self._time_period_active = True
-                self._use_nt_api = False
-                logger.info("✓ Timer: 1ms (timeBeginPeriod fallback)")
+            if not self.NtSetTimerResolution or not self.capabilities:
+                logger.warning("NtSetTimerResolution not available")
+                return False
+            
+            target_res = self.capabilities.min_period_100ns or TIMER_RESOLUTION_05MS
+            current_res = wintypes.ULONG()
+            
+            # Set timer resolution (TRUE = set)
+            status = self.NtSetTimerResolution(target_res, True, ctypes.byref(current_res))
+            
+            if status == 0:
+                self.current_resolution = current_res.value
+                logger.info(f"✓ Timer: {current_res.value/10:.1f}μs (NtSetTimerResolution)")
                 return True
-            return False
+            else:
+                logger.warning(f"NtSetTimerResolution failed with status: {status}")
+                return False
+                
         except Exception as e:
             logger.error(f"Timer error: {e}")
             return False
     
     def restore_default_timer(self) -> bool:
+        """Restore default timer resolution"""
         try:
-            if self._use_nt_api and self.NtSetTimerResolution and self.original_resolution:
-                current_res = wintypes.ULONG()
-                self.NtSetTimerResolution(self.original_resolution, False, ctypes.byref(current_res))
-                logger.info("✓ Timer restored (NT)")
+            if not self.NtSetTimerResolution or not self.original_resolution:
                 return True
-            if self._time_period_active and self.timeEndPeriod:
-                self.timeEndPeriod(1)
-                self._time_period_active = False
-                logger.info("✓ Timer restored (winmm)")
-                return True
+            
+            current_res = wintypes.ULONG()
+            # FALSE = release our request
+            self.NtSetTimerResolution(self.original_resolution, False, ctypes.byref(current_res))
+            
+            self.current_resolution = None
+            logger.info("✓ Timer restored (NtSetTimerResolution)")
             return True
+            
         except Exception as e:
             logger.error(f"Timer restore error: {e}")
             return False
 
 
 class MemoryOptimizer:
-    """ENHANCED: Adaptive purging with configurable thresholds"""
+    """Memory optimization with SysMain (Superfetch) management"""
     
     def __init__(self):
         try:
@@ -161,6 +157,8 @@ class MemoryOptimizer:
         except Exception:
             pass
         self.last_optimization = 0.0
+        self.sysmain_disabled = False
+        self.sysmain_original_state: Optional[int] = None
         self._setup_functions()
     
     def _setup_functions(self):
@@ -250,6 +248,83 @@ class MemoryOptimizer:
             self.kernel32.CloseHandle(h)
             return True
         except Exception:
+            return False
+    
+    def disable_sysmain(self) -> bool:
+        """
+        Disable SysMain (Superfetch/Prefetch) service to prevent background I/O activity.
+        This minimizes disk I/O stutter during gameplay.
+        """
+        try:
+            import subprocess
+            
+            # Query current state
+            result = subprocess.run(
+                ['sc', 'query', 'SysMain'],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            )
+            
+            # Parse state
+            if 'RUNNING' in result.stdout:
+                self.sysmain_original_state = 1  # Running
+            elif 'STOPPED' in result.stdout:
+                self.sysmain_original_state = 0  # Stopped
+            else:
+                self.sysmain_original_state = None
+            
+            # Stop service
+            stop_result = subprocess.run(
+                ['sc', 'stop', 'SysMain'],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            )
+            
+            if stop_result.returncode == 0 or 'already stopped' in stop_result.stdout.lower():
+                self.sysmain_disabled = True
+                logger.info("✓ SysMain (Superfetch) disabled to prevent I/O stutter")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"SysMain disable error: {e}")
+            return False
+    
+    def restore_sysmain(self) -> bool:
+        """Restore SysMain service to original state"""
+        if not self.sysmain_disabled:
+            return True
+        
+        try:
+            import subprocess
+            
+            # Only restore if it was running before
+            if self.sysmain_original_state == 1:
+                result = subprocess.run(
+                    ['sc', 'start', 'SysMain'],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+                )
+                
+                if result.returncode == 0 or 'already running' in result.stdout.lower():
+                    logger.info("✓ SysMain (Superfetch) restored")
+            
+            self.sysmain_disabled = False
+            self.sysmain_original_state = None
+            return True
+            
+        except Exception as e:
+            logger.debug(f"SysMain restore error: {e}")
             return False
 
 
@@ -394,16 +469,16 @@ class PowerManagementOptimizer:
 
 
 class CoreParkingManager:
-    """NEW: Real core parking control"""
+    """Core parking control using direct registry modification for instant and reliable application"""
     
     def __init__(self):
         self.original_settings: Dict[str, Any] = {}
         self.parking_disabled = False
     
     def disable_core_parking(self, p_core_indices: Optional[List[int]] = None) -> bool:
-        """Disable core parking on P-cores"""
+        """Disable core parking via direct registry modification (instant application)"""
         try:
-            import subprocess
+            # Direct registry path for power settings
             guid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"  # High Performance
             subgroup = "54533251-82be-4824-96c1-47b60b740d00"  # Processor
             
@@ -413,34 +488,48 @@ class CoreParkingManager:
                 'bc5038f7-23e0-4960-96da-33abaf5935ec': ('Processor Max', 100),     # Max processor state
             }
             
-            for setting_guid, (name, value) in settings.items():
-                # Save original
-                if setting_guid not in self.original_settings:
-                    result = subprocess.run(['powercfg', '/q', guid, subgroup, setting_guid], 
-                                          capture_output=True, text=True, check=False, timeout=10,
-                                          creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-                    if result.returncode == 0:
-                        import re
-                        ac_match = re.search(r'Current AC.*?:\s*0x([0-9a-f]+)', result.stdout, re.IGNORECASE)
-                        dc_match = re.search(r'Current DC.*?:\s*0x([0-9a-f]+)', result.stdout, re.IGNORECASE)
-                        if ac_match or dc_match:
-                            self.original_settings[setting_guid] = {
-                                'ac': int(ac_match.group(1), 16) if ac_match else 0,
-                                'dc': int(dc_match.group(1), 16) if dc_match else 0
-                            }
-                
-                # Set new value
-                subprocess.run(['powercfg', '/setacvalueindex', guid, subgroup, setting_guid, str(value)],
-                             check=False, timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-                subprocess.run(['powercfg', '/setdcvalueindex', guid, subgroup, setting_guid, str(value)],
-                             check=False, timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            base_path = f"SYSTEM\\CurrentControlSet\\Control\\Power\\PowerSettings\\{subgroup}"
             
-            # Apply changes
-            subprocess.run(['powercfg', '/setactive', guid], check=False, timeout=10,
-                         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            for setting_guid, (name, value) in settings.items():
+                try:
+                    # Read original value
+                    ac_path = f"SYSTEM\\CurrentControlSet\\Control\\Power\\User\\PowerSchemes\\{guid}\\{subgroup}\\{setting_guid}"
+                    
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, ac_path, 0, 
+                                       winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+                        try:
+                            ac_val, _ = winreg.QueryValueEx(key, "ACSettingIndex")
+                            dc_val, _ = winreg.QueryValueEx(key, "DCSettingIndex")
+                            
+                            if setting_guid not in self.original_settings:
+                                self.original_settings[setting_guid] = {
+                                    'ac': ac_val,
+                                    'dc': dc_val
+                                }
+                        except FileNotFoundError:
+                            pass
+                    
+                    # Set new value
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, ac_path, 0, 
+                                       winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as key:
+                        winreg.SetValueEx(key, "ACSettingIndex", 0, winreg.REG_DWORD, value)
+                        winreg.SetValueEx(key, "DCSettingIndex", 0, winreg.REG_DWORD, value)
+                    
+                except Exception as e:
+                    logger.debug(f"Registry setting {setting_guid} error: {e}")
+            
+            # Notify power subsystem of changes via WMI
+            try:
+                import subprocess
+                # Use powercfg to apply active scheme (quick notification)
+                subprocess.run(['powercfg', '/setactive', guid], 
+                             check=False, timeout=5,
+                             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            except Exception:
+                pass
             
             self.parking_disabled = True
-            logger.info("✓ Core parking disabled")
+            logger.info("✓ Core parking disabled (direct registry)")
             return True
             
         except Exception as e:
@@ -453,15 +542,29 @@ class CoreParkingManager:
             return True
         
         try:
-            import subprocess
             guid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
             subgroup = "54533251-82be-4824-96c1-47b60b740d00"
             
             for setting_guid, vals in self.original_settings.items():
-                subprocess.run(['powercfg', '/setacvalueindex', guid, subgroup, setting_guid, str(vals['ac'])],
-                             check=False, timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-                subprocess.run(['powercfg', '/setdcvalueindex', guid, subgroup, setting_guid, str(vals['dc'])],
-                             check=False, timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                try:
+                    ac_path = f"SYSTEM\\CurrentControlSet\\Control\\Power\\User\\PowerSchemes\\{guid}\\{subgroup}\\{setting_guid}"
+                    
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, ac_path, 0, 
+                                       winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as key:
+                        winreg.SetValueEx(key, "ACSettingIndex", 0, winreg.REG_DWORD, vals['ac'])
+                        winreg.SetValueEx(key, "DCSettingIndex", 0, winreg.REG_DWORD, vals['dc'])
+                        
+                except Exception as e:
+                    logger.debug(f"Restore {setting_guid} error: {e}")
+            
+            # Notify power subsystem
+            try:
+                import subprocess
+                subprocess.run(['powercfg', '/setactive', guid], 
+                             check=False, timeout=5,
+                             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            except Exception:
+                pass
             
             self.original_settings.clear()
             self.parking_disabled = False

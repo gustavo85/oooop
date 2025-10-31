@@ -62,14 +62,20 @@ class SessionTelemetry:
     optimizations: List[str]
     profile_name: str
     
-    # Hardware info
+    # Hardware info with exact versions
     cpu_model: str
     gpu_model: str
     ram_gb: int
+    gpu_driver_version: str  # Exact driver version
+    bios_version: str        # BIOS version
     
     # DPC latency
     dpc_latency_avg_us: float
     dpc_spikes_count: int
+    
+    # NEW: Context switch metrics
+    context_switches_avg: float
+    context_switch_spikes: int
 
 
 class PerformanceMonitor:
@@ -96,7 +102,7 @@ class PerformanceMonitor:
             self.qpc_freq_val = 1000000  # Fallback to microseconds
     
     def start_monitoring(self, pid: int, game_exe: str) -> bool:
-        """Start monitoring for a game process"""
+        """Start monitoring for a game process with context switch tracking"""
         
         with self.lock:
             if pid in self.active_sessions:
@@ -112,6 +118,7 @@ class PerformanceMonitor:
                     'cpu_samples': deque(maxlen=600),    # 10 min at 1Hz
                     'memory_samples': deque(maxlen=600),
                     'dpc_readings': deque(maxlen=1000),
+                    'context_switches': deque(maxlen=1000),  # NEW: Context switch tracking
                     'active': True
                 }
                 
@@ -134,12 +141,13 @@ class PerformanceMonitor:
                 return False
     
     def _monitor_loop(self, pid: int):
-        """Background monitoring loop"""
+        """Background monitoring loop with context switch tracking"""
         
         try:
             process = psutil.Process(pid)
             last_frame_time = self._get_qpc_time()
             last_dpc_check = time.time()
+            last_context_switches = None
             
             while True:
                 with self.lock:
@@ -162,6 +170,22 @@ class PerformanceMonitor:
                 try:
                     cpu_percent = process.cpu_percent(interval=0.1)
                     memory_mb = process.memory_info().rss / (1024 * 1024)
+                    
+                    # Context switch tracking
+                    try:
+                        ctx_switches = process.num_ctx_switches()
+                        if last_context_switches is not None:
+                            # Calculate delta
+                            voluntary_delta = ctx_switches.voluntary - last_context_switches.voluntary
+                            involuntary_delta = ctx_switches.involuntary - last_context_switches.involuntary
+                            total_switches = voluntary_delta + involuntary_delta
+                            
+                            with self.lock:
+                                session['context_switches'].append(total_switches)
+                        
+                        last_context_switches = ctx_switches
+                    except Exception:
+                        pass
                     
                     with self.lock:
                         session['cpu_samples'].append(cpu_percent)
@@ -310,6 +334,8 @@ class PerformanceMonitor:
                     'memory_mb_avg': statistics.mean(session['memory_samples']) if session['memory_samples'] else 0,
                     'dpc_latency_avg_us': statistics.mean([r.latency_us for r in session['dpc_readings']]) if session['dpc_readings'] else 0,
                     'dpc_spikes_count': sum(1 for r in session['dpc_readings'] if r.latency_us > 500),
+                    'context_switches_avg': statistics.mean(session['context_switches']) if session['context_switches'] else 0,
+                    'context_switch_spikes': sum(1 for cs in session['context_switches'] if cs > 1000) if session['context_switches'] else 0,
                 }
                 
                 return summary
@@ -343,7 +369,7 @@ class TelemetryCollector:
         self.telemetry_dir.mkdir(parents=True, exist_ok=True)
     
     def start_session(self, pid: int, game_exe: str, profile, opt_state):
-        """Start telemetry collection for a session"""
+        """Start telemetry collection for a session with exact hardware versions"""
         
         with self.lock:
             import uuid
@@ -358,6 +384,8 @@ class TelemetryCollector:
                 'cpu_model': self._get_cpu_model(),
                 'gpu_model': self._get_gpu_model(),
                 'ram_gb': self._get_ram_gb(),
+                'gpu_driver_version': self._get_gpu_driver_version(),
+                'bios_version': self._get_bios_version(),
             }
     
     def end_session(self, pid: int) -> Optional[SessionTelemetry]:
@@ -379,6 +407,8 @@ class TelemetryCollector:
             session_data['memory_usage_avg_mb'] = 0.0
             session_data['dpc_latency_avg_us'] = 0.0
             session_data['dpc_spikes_count'] = 0
+            session_data['context_switches_avg'] = 0.0
+            session_data['context_switch_spikes'] = 0
             
             telemetry = SessionTelemetry(**session_data)
             self.completed_sessions.append(telemetry)
@@ -444,6 +474,43 @@ class TelemetryCollector:
             return int(psutil.virtual_memory().total / (1024**3))
         except Exception:
             return 0
+    
+    def _get_gpu_driver_version(self) -> str:
+        """Get exact GPU driver version (e.g., 555.99 for NVIDIA)"""
+        try:
+            import wmi
+            w = wmi.WMI()
+            for gpu in w.Win32_VideoController():
+                if gpu.DriverVersion:
+                    return gpu.DriverVersion
+        except Exception:
+            pass
+        
+        # Fallback: Try registry for NVIDIA
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 
+                               r"SOFTWARE\NVIDIA Corporation\Global\Display", 0, 
+                               winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+                version, _ = winreg.QueryValueEx(key, "Version")
+                return version
+        except Exception:
+            pass
+        
+        return "Unknown"
+    
+    def _get_bios_version(self) -> str:
+        """Get exact BIOS version"""
+        try:
+            import wmi
+            w = wmi.WMI()
+            for bios in w.Win32_BIOS():
+                if bios.SMBIOSBIOSVersion:
+                    return bios.SMBIOSBIOSVersion
+        except Exception:
+            pass
+        
+        return "Unknown"
 
 
 class ABTestingFramework:
