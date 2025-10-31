@@ -17,6 +17,7 @@ try:
     from sklearn.ensemble import RandomForestRegressor
     from sklearn.preprocessing import StandardScaler
     from sklearn.model_selection import train_test_split
+    from sklearn.linear_model import SGDRegressor  # For incremental learning
     import numpy as np
     SKLEARN_AVAILABLE = True
 except ImportError:
@@ -37,7 +38,7 @@ class HardwareProfile:
 
 
 class MLAutoTuner:
-    """Machine Learning Auto-Tuner for game profile optimization"""
+    """Machine Learning Auto-Tuner for game profile optimization with incremental learning"""
     
     def __init__(self):
         self.model_dir = Path.home() / '.game_optimizer' / 'ml_models'
@@ -45,12 +46,16 @@ class MLAutoTuner:
         
         self.model_file = self.model_dir / 'fps_predictor.pkl'
         self.scaler_file = self.model_dir / 'scaler.pkl'
+        self.incremental_model_file = self.model_dir / 'incremental_model.pkl'
         
         self.model: Optional[Any] = None
         self.scaler: Optional[Any] = None
+        self.incremental_model: Optional[Any] = None  # For online learning
         
         self.training_data: List[Dict[str, Any]] = []
         self.training_data_file = self.model_dir / 'training_data.json'
+        
+        self.use_incremental_learning = True  # Enable incremental learning by default
         
         if SKLEARN_AVAILABLE:
             self._load_model()
@@ -71,6 +76,25 @@ class MLAutoTuner:
                 logger.info("✓ ML model loaded")
             else:
                 logger.info("No pre-trained model found. Will train on first use.")
+            
+            # Load incremental model if exists
+            if self.incremental_model_file.exists():
+                with open(self.incremental_model_file, 'rb') as f:
+                    self.incremental_model = pickle.load(f)
+                logger.info("✓ Incremental learning model loaded")
+            else:
+                # Initialize incremental learning model
+                if SKLEARN_AVAILABLE:
+                    self.incremental_model = SGDRegressor(
+                        loss='squared_error',
+                        penalty='l2',
+                        alpha=0.0001,
+                        learning_rate='adaptive',
+                        eta0=0.01,
+                        max_iter=1000,
+                        warm_start=True  # Enable incremental learning
+                    )
+                    logger.info("✓ Incremental learning model initialized")
                 
         except Exception as e:
             logger.error(f"Model load error: {e}")
@@ -89,28 +113,34 @@ class MLAutoTuner:
     
     def save_model(self):
         """Save trained model to disk"""
-        if not SKLEARN_AVAILABLE or self.model is None:
+        if not SKLEARN_AVAILABLE:
             return
         
         try:
-            with open(self.model_file, 'wb') as f:
-                pickle.dump(self.model, f)
+            if self.model is not None:
+                with open(self.model_file, 'wb') as f:
+                    pickle.dump(self.model, f)
             
-            with open(self.scaler_file, 'wb') as f:
-                pickle.dump(self.scaler, f)
+            if self.scaler is not None:
+                with open(self.scaler_file, 'wb') as f:
+                    pickle.dump(self.scaler, f)
             
-            logger.info("✓ ML model saved")
+            if self.incremental_model is not None:
+                with open(self.incremental_model_file, 'wb') as f:
+                    pickle.dump(self.incremental_model, f)
+            
+            logger.info("✓ ML models saved")
             
         except Exception as e:
             logger.error(f"Model save error: {e}")
     
     def add_training_sample(self, telemetry_data) -> bool:
-        """Add telemetry data as training sample"""
+        """Add telemetry data as training sample with incremental learning"""
         if not SKLEARN_AVAILABLE:
             return False
         
         try:
-            # Extract features from telemetry
+            # Extract features from telemetry including DPC latency and stutter count
             sample = {
                 'game_exe': telemetry_data.game_exe,
                 'cpu_model': telemetry_data.cpu_model,
@@ -119,7 +149,10 @@ class MLAutoTuner:
                 'optimizations': telemetry_data.optimizations,
                 'avg_fps': telemetry_data.frame_metrics.avg_fps if telemetry_data.frame_metrics else 0,
                 'one_percent_low': telemetry_data.frame_metrics.one_percent_low if telemetry_data.frame_metrics else 0,
+                'stutter_count': telemetry_data.frame_metrics.stutter_count if telemetry_data.frame_metrics else 0,
                 'cpu_usage': telemetry_data.cpu_usage_avg,
+                'dpc_latency_avg_us': telemetry_data.dpc_latency_avg_us,
+                'dpc_spikes_count': telemetry_data.dpc_spikes_count,
                 'timestamp': time.time()
             }
             
@@ -129,7 +162,11 @@ class MLAutoTuner:
             with open(self.training_data_file, 'w', encoding='utf-8') as f:
                 json.dump(self.training_data, f, indent=2)
             
-            # Retrain if we have enough samples
+            # Incremental learning: update model immediately with new sample
+            if self.use_incremental_learning and self.incremental_model is not None:
+                self._partial_fit_sample(sample)
+            
+            # Full retrain if we have enough samples
             if len(self.training_data) >= 20:
                 self.train_model()
             
@@ -137,6 +174,50 @@ class MLAutoTuner:
             
         except Exception as e:
             logger.error(f"Add training sample error: {e}")
+            return False
+    
+    def _partial_fit_sample(self, sample: Dict[str, Any]) -> bool:
+        """Incrementally update model with a single sample (online learning)"""
+        try:
+            features = self._extract_features(sample)
+            avg_fps = sample.get('avg_fps', 0)
+            
+            if not features or avg_fps <= 0:
+                return False
+            
+            # Quality score: FPS - (stutter_count * 0.1) - (dpc_latency * 0.01)
+            # This teaches the model that stutters and DPC latency are bad
+            stutter_count = sample.get('stutter_count', 0)
+            dpc_latency = sample.get('dpc_latency_avg_us', 0)
+            quality_score = avg_fps - (stutter_count * 0.1) - (dpc_latency * 0.01)
+            
+            X = np.array([features])
+            y = np.array([quality_score])
+            
+            # Scale if scaler exists, otherwise fit new scaler
+            if self.scaler is None:
+                self.scaler = StandardScaler()
+                X_scaled = self.scaler.fit_transform(X)
+            else:
+                # Partial fit scaler (update running statistics)
+                try:
+                    self.scaler.partial_fit(X)
+                except AttributeError:
+                    # StandardScaler doesn't have partial_fit, just transform
+                    pass
+                X_scaled = self.scaler.transform(X)
+            
+            # Partial fit the incremental model
+            self.incremental_model.partial_fit(X_scaled, y)
+            
+            # Save updated models
+            self.save_model()
+            
+            logger.info(f"✓ Incremental learning: updated model with new sample (quality={quality_score:.1f})")
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Partial fit error: {e}")
             return False
     
     def train_model(self) -> bool:
@@ -200,7 +281,7 @@ class MLAutoTuner:
             return False
     
     def _extract_features(self, sample: Dict) -> Optional[List[float]]:
-        """Extract numerical features from sample"""
+        """Extract numerical features from sample including DPC latency and stutter count"""
         try:
             features = []
             
@@ -221,6 +302,16 @@ class MLAutoTuner:
             features.append(1.0 if 'nvidia' in gpu or 'geforce' in gpu or 'rtx' in gpu else 0.0)
             features.append(1.0 if 'amd' in gpu or 'radeon' in gpu else 0.0)
             features.append(1.0 if 'intel' in gpu else 0.0)
+            
+            # NEW: DPC latency (normalized to 0-1 range, 0=good, 1=bad)
+            dpc_latency_us = float(sample.get('dpc_latency_avg_us', 0))
+            # Normalize: 0-1000μs -> 0-1
+            features.append(min(dpc_latency_us / 1000.0, 1.0))
+            
+            # NEW: Stutter count (normalized, log scale to handle large values)
+            stutter_count = float(sample.get('stutter_count', 0))
+            # Log normalize: helps with large outliers
+            features.append(min(np.log1p(stutter_count) / 10.0, 1.0))
             
             return features
             
