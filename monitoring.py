@@ -442,7 +442,9 @@ class PerformanceMonitor:
                 
                 # Calculate recent P99.9
                 p999_idx = int(n_frames * 0.999)
-                current_p999 = frame_times_sorted[p999_idx] if p999_idx < n_frames else frame_times_sorted[-1]
+                # Clamp index to valid range
+                p999_idx = min(p999_idx, n_frames - 1)
+                current_p999 = frame_times_sorted[p999_idx]
                 
                 # Check if baseline exists
                 baseline_p999 = session.get('baseline_frame_time_p999')

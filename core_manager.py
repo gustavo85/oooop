@@ -1103,15 +1103,26 @@ class GameOptimizer:
         }
         
         rollback_triggered = set()  # Track which PIDs have already triggered rollback
+        session_start_times = {}  # Track when each session started
         
         while self.monitor_active:
             with self.optimization_lock:
                 active_pids = set(self.active_optimizations.keys())
+                # Track session start times
+                for pid in active_pids:
+                    if pid not in session_start_times:
+                        session_start_times[pid] = time.time()
             
             # Check for critical alerts on active sessions
+            current_time = time.time()
             for pid in list(active_pids):
                 if pid in rollback_triggered:
                     continue  # Already rolled back, skip
+                
+                # Skip checking if session is too new (< 30 seconds - need baseline)
+                session_age = current_time - session_start_times.get(pid, current_time)
+                if session_age < 30:
+                    continue
                 
                 # Check if critical performance degradation detected
                 if self.performance_monitor.check_critical_alerts(pid):
@@ -1149,6 +1160,8 @@ class GameOptimizer:
                     self.stop_optimization(pid, optimization_failed=failed)
                     if pid in rollback_triggered:
                         rollback_triggered.remove(pid)
+                    if pid in session_start_times:
+                        del session_start_times[pid]
             
             time.sleep(10)
     

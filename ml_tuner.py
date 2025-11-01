@@ -254,42 +254,47 @@ class MLAutoTuner:
         try:
             logger.info(f"Training ML models on {len(self.training_data)} samples...")
             
-            # Extract features and targets
-            X = []
+            # Extract features and targets - separate datasets for FPS and stability
+            X_fps = []
             y_fps = []
+            
+            X_stability = []
             y_stability = []
             
             for sample in self.training_data:
-                # Skip failed optimizations for FPS training (but use for stability)
-                if sample.get('optimization_failed', False):
+                features = self._extract_features(sample)
+                if not features:
                     continue
                 
-                features = self._extract_features(sample)
-                if features and sample.get('avg_fps', 0) > 0:
-                    X.append(features)
+                # For FPS training: only use successful optimizations with valid FPS
+                if not sample.get('optimization_failed', False) and sample.get('avg_fps', 0) > 0:
+                    X_fps.append(features)
                     y_fps.append(sample['avg_fps'])
-                    
-                    # Stability target: 1 if unstable (high DPC latency), 0 if stable
-                    dpc_max = sample.get('dpc_latency_max_us', 0)
-                    is_unstable = 1 if dpc_max > 1000 else 0
-                    y_stability.append(is_unstable)
+                
+                # For stability training: use ALL samples (especially failed ones are valuable)
+                X_stability.append(features)
+                # Stability target: 1 if unstable (high DPC latency OR failed optimization), 0 if stable
+                dpc_max = sample.get('dpc_latency_max_us', 0)
+                opt_failed = sample.get('optimization_failed', False)
+                is_unstable = 1 if (dpc_max > 1000 or opt_failed) else 0
+                y_stability.append(is_unstable)
             
-            if len(X) < 10:
-                logger.warning("Not enough valid samples after feature extraction")
+            if len(X_fps) < 10:
+                logger.warning("Not enough valid FPS samples after feature extraction")
                 return False
             
-            X = np.array(X)
+            # Convert to numpy arrays
+            X_fps = np.array(X_fps)
             y_fps = np.array(y_fps)
-            y_stability = np.array(y_stability)
             
-            # Split data
-            X_train, X_test, y_fps_train, y_fps_test, y_stab_train, y_stab_test = train_test_split(
-                X, y_fps, y_stability, test_size=0.2, random_state=42)
+            # Split FPS data
+            X_fps_train, X_fps_test, y_fps_train, y_fps_test = train_test_split(
+                X_fps, y_fps, test_size=0.2, random_state=42)
             
             # Scale features
             self.scaler = StandardScaler()
-            X_train_scaled = self.scaler.fit_transform(X_train)
-            X_test_scaled = self.scaler.transform(X_test)
+            X_fps_train_scaled = self.scaler.fit_transform(X_fps_train)
+            X_fps_test_scaled = self.scaler.transform(X_fps_test)
             
             # Train FPS model
             self.model = RandomForestRegressor(
@@ -299,30 +304,46 @@ class MLAutoTuner:
                 n_jobs=-1
             )
             
-            self.model.fit(X_train_scaled, y_fps_train)
+            self.model.fit(X_fps_train_scaled, y_fps_train)
             
             # Evaluate FPS model
-            train_score = self.model.score(X_train_scaled, y_fps_train)
-            test_score = self.model.score(X_test_scaled, y_fps_test)
+            train_score = self.model.score(X_fps_train_scaled, y_fps_train)
+            test_score = self.model.score(X_fps_test_scaled, y_fps_test)
             
             logger.info(f"✓ FPS model trained: R²_train={train_score:.3f}, R²_test={test_score:.3f}")
             
-            # Train stability model (only if we have both classes)
-            if len(np.unique(y_stability)) > 1:
-                from sklearn.linear_model import LogisticRegression
-                self.stability_model = LogisticRegression(
-                    penalty='l2',
-                    C=1.0,
-                    max_iter=1000,
-                    random_state=42
-                )
+            # Train stability model (only if we have both classes and enough samples)
+            if len(X_stability) >= 10:
+                X_stability = np.array(X_stability)
+                y_stability = np.array(y_stability)
                 
-                self.stability_model.fit(X_train_scaled, y_stab_train)
-                
-                stab_score = self.stability_model.score(X_test_scaled, y_stab_test)
-                logger.info(f"✓ Stability model trained: Accuracy={stab_score:.3f}")
+                # Check if we have both classes
+                unique_labels = np.unique(y_stability)
+                if len(unique_labels) > 1:
+                    # Split stability data with stratification
+                    X_stab_train, X_stab_test, y_stab_train, y_stab_test = train_test_split(
+                        X_stability, y_stability, test_size=0.2, random_state=42, stratify=y_stability)
+                    
+                    # Use same scaler (already fitted on FPS data)
+                    X_stab_train_scaled = self.scaler.transform(X_stab_train)
+                    X_stab_test_scaled = self.scaler.transform(X_stab_test)
+                    
+                    from sklearn.linear_model import LogisticRegression
+                    self.stability_model = LogisticRegression(
+                        penalty='l2',
+                        C=1.0,
+                        max_iter=1000,
+                        random_state=42
+                    )
+                    
+                    self.stability_model.fit(X_stab_train_scaled, y_stab_train)
+                    
+                    stab_score = self.stability_model.score(X_stab_test_scaled, y_stab_test)
+                    logger.info(f"✓ Stability model trained: Accuracy={stab_score:.3f}")
+                else:
+                    logger.info("⚠️  Not enough diversity in stability labels, skipping stability model training")
             else:
-                logger.info("⚠️  Not enough diversity in stability labels, skipping stability model training")
+                logger.info("⚠️  Not enough stability samples, skipping stability model training")
             
             # Save models
             self.save_model()
@@ -376,14 +397,15 @@ class MLAutoTuner:
             # Normalize: 30-100°C -> 0-1
             features.append(max(0.0, min((gpu_temp - 30) / 70.0, 1.0)))
             
-            # NEW: GPU driver version (encoded as numeric)
-            # Extract major.minor version numbers and encode
+            # NEW: GPU driver version (encoded as hash to avoid version comparison issues)
+            # Use simple hash-based encoding for driver version as categorical feature
             driver_version = sample.get('gpu_driver_version', '0.0')
             try:
-                # Parse version like "555.99" or "31.0.15.4601" to a single number
-                parts = driver_version.replace('.', '')[:4]  # Take first 4 digits
-                driver_numeric = float(parts) / 10000.0  # Normalize to 0-1 range
-            except (ValueError, AttributeError):
+                # Hash the driver version string and normalize to 0-1 range
+                # This treats each version as a unique category without assuming ordering
+                driver_hash = hash(driver_version) % 10000  # Mod to keep it reasonable
+                driver_numeric = driver_hash / 10000.0
+            except (ValueError, AttributeError, TypeError):
                 driver_numeric = 0.0
             features.append(driver_numeric)
             
