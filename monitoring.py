@@ -1,6 +1,6 @@
 """
-Performance Monitoring V3.5 - ETW Frame Time + DPC Latency + Telemetry + A/B Testing
-NEW: Real implementation of ETW monitoring, DPC detection, telemetry export
+Performance Monitoring V4.0 - Real ETW Frame Time + DPC Latency + Telemetry + A/B Testing
+NEW V4.0: Real ETW implementation via etw_monitor.py module
 """
 
 import ctypes
@@ -17,6 +17,17 @@ from collections import deque
 import psutil
 
 logger = logging.getLogger(__name__)
+
+# Try to import real ETW monitors
+try:
+    from etw_monitor import ETWFrameTimeMonitor, ETWDPCLatencyMonitor
+    ETW_AVAILABLE = True
+    logger.info("✓ Real ETW monitoring available")
+except ImportError:
+    ETW_AVAILABLE = False
+    logger.warning("⚠️ Real ETW monitoring not available, using fallback mode")
+    ETWFrameTimeMonitor = None
+    ETWDPCLatencyMonitor = None
 
 
 @dataclass
@@ -92,7 +103,8 @@ class SessionTelemetry:
 
 class PerformanceMonitor:
     """
-    Real-time performance monitoring using simplified ETW approach + QueryPerformanceCounter
+    Real-time performance monitoring using ETW (when available) or fallback to QPC
+    V4.0: Integrated with real ETW frame time and DPC latency monitors
     """
     
     def __init__(self):
@@ -100,6 +112,22 @@ class PerformanceMonitor:
         self.lock = threading.Lock()
         self.monitor_threads: Dict[int, threading.Thread] = {}
         
+        # ETW monitors (V4.0)
+        self.etw_frame_monitor: Optional[Any] = None
+        self.etw_dpc_monitor: Optional[Any] = None
+        self.use_etw = ETW_AVAILABLE
+        
+        # Initialize ETW monitors if available
+        if self.use_etw and ETWFrameTimeMonitor and ETWDPCLatencyMonitor:
+            try:
+                self.etw_frame_monitor = ETWFrameTimeMonitor()
+                self.etw_dpc_monitor = ETWDPCLatencyMonitor()
+                logger.info("✓ Real ETW monitors initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize ETW monitors, using fallback: {e}")
+                self.use_etw = False
+        
+        # Fallback QPC timer
         try:
             self.kernel32 = ctypes.windll.kernel32
             self.QueryPerformanceFrequency = self.kernel32.QueryPerformanceFrequency
@@ -114,7 +142,7 @@ class PerformanceMonitor:
             self.qpc_freq_val = 1000000  # Fallback to microseconds
     
     def start_monitoring(self, pid: int, game_exe: str) -> bool:
-        """Start monitoring for a game process with context switch tracking"""
+        """Start monitoring for a game process with ETW (when available) or fallback mode"""
         
         with self.lock:
             if pid in self.active_sessions:
@@ -134,12 +162,36 @@ class PerformanceMonitor:
                     'cpu_temp_samples': deque(maxlen=600),  # NEW: CPU temperature tracking
                     'gpu_temp_samples': deque(maxlen=600),  # NEW: GPU temperature tracking
                     'active': True,
-                    'baseline_frame_time_p999': None  # NEW: Baseline for alerts
+                    'baseline_frame_time_p999': None,  # NEW: Baseline for alerts
+                    'use_etw': self.use_etw,  # Track if this session uses ETW
                 }
                 
                 self.active_sessions[pid] = session
                 
-                # Start monitoring thread
+                # Start ETW monitors if available (V4.0)
+                if self.use_etw and self.etw_frame_monitor and self.etw_dpc_monitor:
+                    try:
+                        # Start frame time monitoring via ETW
+                        if self.etw_frame_monitor.start(session_name=f"FrameTime_{pid}"):
+                            session['etw_frame_active'] = True
+                            logger.info(f"✓ ETW frame time monitoring started for PID {pid}")
+                        else:
+                            session['etw_frame_active'] = False
+                            logger.warning(f"ETW frame monitor failed to start for PID {pid}, using fallback")
+                        
+                        # Start DPC monitoring via ETW
+                        if self.etw_dpc_monitor.start(session_name=f"DPC_{pid}"):
+                            session['etw_dpc_active'] = True
+                            logger.info(f"✓ ETW DPC monitoring started for PID {pid}")
+                        else:
+                            session['etw_dpc_active'] = False
+                            logger.warning(f"ETW DPC monitor failed to start for PID {pid}, using fallback")
+                    except Exception as e:
+                        logger.warning(f"ETW startup error for PID {pid}: {e}, using fallback")
+                        session['etw_frame_active'] = False
+                        session['etw_dpc_active'] = False
+                
+                # Start monitoring thread (handles both ETW and fallback modes)
                 monitor_thread = threading.Thread(
                     target=self._monitor_loop,
                     args=(pid,),
@@ -156,7 +208,7 @@ class PerformanceMonitor:
                 return False
     
     def _monitor_loop(self, pid: int):
-        """Background monitoring loop with context switch tracking and temperature monitoring"""
+        """Background monitoring loop with ETW or fallback mode"""
         
         try:
             process = psutil.Process(pid)
@@ -164,6 +216,7 @@ class PerformanceMonitor:
             last_dpc_check = time.time()
             last_temp_check = time.time()
             last_context_switches = None
+            last_etw_sync = time.time()
             
             while True:
                 with self.lock:
@@ -171,16 +224,30 @@ class PerformanceMonitor:
                         break
                     
                     session = self.active_sessions[pid]
+                    use_etw_frames = session.get('etw_frame_active', False)
+                    use_etw_dpc = session.get('etw_dpc_active', False)
                 
-                # Frame time estimation (simple approach: assume 60 Hz baseline)
-                current_time = self._get_qpc_time()
-                frame_delta = (current_time - last_frame_time) * 1000  # ms
-                
-                if 5 < frame_delta < 500:  # Sanity check: 2-200 FPS
-                    with self.lock:
-                        session['frame_times'].append(frame_delta)
-                
-                last_frame_time = current_time
+                # Frame time collection: ETW or fallback
+                if use_etw_frames and self.etw_frame_monitor:
+                    # Sync ETW frame times every second
+                    if time.time() - last_etw_sync > 1.0:
+                        etw_frame_times = self.etw_frame_monitor.get_frame_times()
+                        if etw_frame_times:
+                            with self.lock:
+                                # Add new ETW frame times
+                                for ft in etw_frame_times[-100:]:  # Last 100 frames
+                                    session['frame_times'].append(ft)
+                        last_etw_sync = time.time()
+                else:
+                    # Fallback: QPC-based frame time estimation
+                    current_time = self._get_qpc_time()
+                    frame_delta = (current_time - last_frame_time) * 1000  # ms
+                    
+                    if 5 < frame_delta < 500:  # Sanity check: 2-200 FPS
+                        with self.lock:
+                            session['frame_times'].append(frame_delta)
+                    
+                    last_frame_time = current_time
                 
                 # CPU/Memory sampling (every second)
                 try:
@@ -223,10 +290,25 @@ class PerformanceMonitor:
                     
                     last_temp_check = time.time()
                 
-                # DPC latency check (every 5 seconds)
+                # DPC latency check (every 5 seconds): ETW or fallback
                 if time.time() - last_dpc_check > 5:
-                    dpc_latency = self._measure_dpc_latency()
-                    if dpc_latency:
+                    if use_etw_dpc and self.etw_dpc_monitor:
+                        # Use real ETW DPC data
+                        avg_latency = self.etw_dpc_monitor.get_average_latency()
+                        max_latency = self.etw_dpc_monitor.get_recent_max_latency(window_seconds=60)
+                        
+                        if avg_latency is not None and avg_latency > 100:
+                            dpc_latency = DPCLatencyReading(
+                                timestamp=time.time(),
+                                latency_us=avg_latency,
+                                offending_driver="ETW-detected"  # Would need driver info from ETW
+                            )
+                            with self.lock:
+                                session['dpc_readings'].append(dpc_latency)
+                    else:
+                        # Fallback: sleep overshoot heuristic
+                        dpc_latency = self._measure_dpc_latency()
+                        if dpc_latency:
                         with self.lock:
                             session['dpc_readings'].append(dpc_latency)
                     last_dpc_check = time.time()
@@ -332,14 +414,30 @@ class PerformanceMonitor:
         return None
     
     def stop_monitoring(self, pid: int) -> bool:
-        """Stop monitoring for a process"""
+        """Stop monitoring for a process and cleanup ETW sessions"""
         
         with self.lock:
             if pid not in self.active_sessions:
                 return False
             
-            self.active_sessions[pid]['active'] = False
-            self.active_sessions[pid]['end_time'] = time.time()
+            session = self.active_sessions[pid]
+            session['active'] = False
+            session['end_time'] = time.time()
+            
+            # Stop ETW monitors for this session
+            if session.get('etw_frame_active', False) and self.etw_frame_monitor:
+                try:
+                    self.etw_frame_monitor.stop()
+                    logger.info(f"✓ ETW frame monitor stopped for PID {pid}")
+                except Exception as e:
+                    logger.debug(f"ETW frame monitor stop error: {e}")
+            
+            if session.get('etw_dpc_active', False) and self.etw_dpc_monitor:
+                try:
+                    self.etw_dpc_monitor.stop()
+                    logger.info(f"✓ ETW DPC monitor stopped for PID {pid}")
+                except Exception as e:
+                    logger.debug(f"ETW DPC monitor stop error: {e}")
         
         # Wait for thread to finish
         if pid in self.monitor_threads:
@@ -483,7 +581,7 @@ class PerformanceMonitor:
                 return False
     
     def cleanup(self):
-        """Stop all monitoring sessions"""
+        """Stop all monitoring sessions and ETW monitors"""
         with self.lock:
             for pid in list(self.active_sessions.keys()):
                 self.active_sessions[pid]['active'] = False
@@ -491,8 +589,22 @@ class PerformanceMonitor:
         for thread in self.monitor_threads.values():
             thread.join(timeout=1)
         
+        # Cleanup ETW monitors
+        if self.etw_frame_monitor:
+            try:
+                self.etw_frame_monitor.stop()
+            except Exception as e:
+                logger.debug(f"ETW frame monitor cleanup error: {e}")
+        
+        if self.etw_dpc_monitor:
+            try:
+                self.etw_dpc_monitor.stop()
+            except Exception as e:
+                logger.debug(f"ETW DPC monitor cleanup error: {e}")
+        
         self.active_sessions.clear()
         self.monitor_threads.clear()
+        logger.info("✓ Performance monitoring cleanup complete")
 
 
 class TelemetryCollector:
