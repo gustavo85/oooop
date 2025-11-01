@@ -136,7 +136,8 @@ def test_dummy_data_generation():
         logger.info(f"  Sample session ID: {session.session_id}")
         logger.info(f"  Game: {session.game_name}")
         logger.info(f"  FPS: {session.fps_avg:.1f}")
-        logger.info(f"  Stability score: {(1 - session.fps_std/session.fps_avg)*100:.1f}")
+        stability_score = ((1 - session.fps_std/session.fps_avg)*100) if session.fps_avg > 0 else 0
+        logger.info(f"  Stability score: {stability_score:.1f}")
         
         logger.info("✓ Dummy data generation works correctly")
         return True
