@@ -309,8 +309,8 @@ class PerformanceMonitor:
                         # Fallback: sleep overshoot heuristic
                         dpc_latency = self._measure_dpc_latency()
                         if dpc_latency:
-                        with self.lock:
-                            session['dpc_readings'].append(dpc_latency)
+                            with self.lock:
+                                session['dpc_readings'].append(dpc_latency)
                     last_dpc_check = time.time()
                 
                 # Sleep to maintain ~60 Hz monitoring
