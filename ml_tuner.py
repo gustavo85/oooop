@@ -35,10 +35,11 @@ class HardwareProfile:
     ram_gb: int
     gpu_vram_gb: int
     gpu_vendor: str  # NVIDIA/AMD/Intel
+    gpu_driver_version: Optional[str] = None  # NEW: Driver version for stability tracking
 
 
 class MLAutoTuner:
-    """Machine Learning Auto-Tuner for game profile optimization with incremental learning"""
+    """Machine Learning Auto-Tuner for game profile optimization with dual-model prediction"""
     
     def __init__(self):
         self.model_dir = Path.home() / '.game_optimizer' / 'ml_models'
@@ -47,10 +48,12 @@ class MLAutoTuner:
         self.model_file = self.model_dir / 'fps_predictor.pkl'
         self.scaler_file = self.model_dir / 'scaler.pkl'
         self.incremental_model_file = self.model_dir / 'incremental_model.pkl'
+        self.stability_model_file = self.model_dir / 'stability_predictor.pkl'  # NEW: Stability model
         
         self.model: Optional[Any] = None
         self.scaler: Optional[Any] = None
         self.incremental_model: Optional[Any] = None  # For online learning
+        self.stability_model: Optional[Any] = None  # NEW: For stability prediction
         
         self.training_data: List[Dict[str, Any]] = []
         self.training_data_file = self.model_dir / 'training_data.json'
@@ -64,7 +67,7 @@ class MLAutoTuner:
             logger.warning("ML Auto-Tuner disabled (scikit-learn not installed)")
     
     def _load_model(self):
-        """Load pre-trained model if exists"""
+        """Load pre-trained models (FPS and stability) if they exist"""
         try:
             if self.model_file.exists() and self.scaler_file.exists():
                 with open(self.model_file, 'rb') as f:
@@ -73,9 +76,9 @@ class MLAutoTuner:
                 with open(self.scaler_file, 'rb') as f:
                     self.scaler = pickle.load(f)
                 
-                logger.info("✓ ML model loaded")
+                logger.info("✓ ML FPS model loaded")
             else:
-                logger.info("No pre-trained model found. Will train on first use.")
+                logger.info("No pre-trained FPS model found. Will train on first use.")
             
             # Load incremental model if exists
             if self.incremental_model_file.exists():
@@ -95,6 +98,23 @@ class MLAutoTuner:
                         warm_start=True  # Enable incremental learning
                     )
                     logger.info("✓ Incremental learning model initialized")
+            
+            # NEW: Load stability model if exists
+            if self.stability_model_file.exists():
+                with open(self.stability_model_file, 'rb') as f:
+                    self.stability_model = pickle.load(f)
+                logger.info("✓ Stability prediction model loaded")
+            else:
+                # Initialize stability model
+                if SKLEARN_AVAILABLE:
+                    from sklearn.linear_model import LogisticRegression
+                    self.stability_model = LogisticRegression(
+                        penalty='l2',
+                        C=1.0,
+                        max_iter=1000,
+                        random_state=42
+                    )
+                    logger.info("✓ Stability prediction model initialized")
                 
         except Exception as e:
             logger.error(f"Model load error: {e}")
@@ -112,7 +132,7 @@ class MLAutoTuner:
             logger.error(f"Training data load error: {e}")
     
     def save_model(self):
-        """Save trained model to disk"""
+        """Save trained models (FPS and stability) to disk"""
         if not SKLEARN_AVAILABLE:
             return
         
@@ -128,6 +148,11 @@ class MLAutoTuner:
             if self.incremental_model is not None:
                 with open(self.incremental_model_file, 'wb') as f:
                     pickle.dump(self.incremental_model, f)
+            
+            # NEW: Save stability model
+            if self.stability_model is not None:
+                with open(self.stability_model_file, 'wb') as f:
+                    pickle.dump(self.stability_model, f)
             
             logger.info("✓ ML models saved")
             
@@ -221,41 +246,57 @@ class MLAutoTuner:
             return False
     
     def train_model(self) -> bool:
-        """Train ML model on collected data"""
+        """Train both FPS and stability ML models on collected data"""
         if not SKLEARN_AVAILABLE or len(self.training_data) < 10:
             logger.warning("Not enough training data (need ≥10 samples)")
             return False
         
         try:
-            logger.info(f"Training ML model on {len(self.training_data)} samples...")
+            logger.info(f"Training ML models on {len(self.training_data)} samples...")
             
-            # Extract features and targets
-            X = []
-            y = []
+            # Extract features and targets - separate datasets for FPS and stability
+            X_fps = []
+            y_fps = []
+            
+            X_stability = []
+            y_stability = []
             
             for sample in self.training_data:
                 features = self._extract_features(sample)
-                if features and sample.get('avg_fps', 0) > 0:
-                    X.append(features)
-                    y.append(sample['avg_fps'])
+                if not features:
+                    continue
+                
+                # For FPS training: only use successful optimizations with valid FPS
+                if not sample.get('optimization_failed', False) and sample.get('avg_fps', 0) > 0:
+                    X_fps.append(features)
+                    y_fps.append(sample['avg_fps'])
+                
+                # For stability training: use ALL samples (especially failed ones are valuable)
+                X_stability.append(features)
+                # Stability target: 1 if unstable (high DPC latency OR failed optimization), 0 if stable
+                dpc_max = sample.get('dpc_latency_max_us', 0)
+                opt_failed = sample.get('optimization_failed', False)
+                is_unstable = 1 if (dpc_max > 1000 or opt_failed) else 0
+                y_stability.append(is_unstable)
             
-            if len(X) < 10:
-                logger.warning("Not enough valid samples after feature extraction")
+            if len(X_fps) < 10:
+                logger.warning("Not enough valid FPS samples after feature extraction")
                 return False
             
-            X = np.array(X)
-            y = np.array(y)
+            # Convert to numpy arrays
+            X_fps = np.array(X_fps)
+            y_fps = np.array(y_fps)
             
-            # Split data
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=42)
+            # Split FPS data
+            X_fps_train, X_fps_test, y_fps_train, y_fps_test = train_test_split(
+                X_fps, y_fps, test_size=0.2, random_state=42)
             
             # Scale features
             self.scaler = StandardScaler()
-            X_train_scaled = self.scaler.fit_transform(X_train)
-            X_test_scaled = self.scaler.transform(X_test)
+            X_fps_train_scaled = self.scaler.fit_transform(X_fps_train)
+            X_fps_test_scaled = self.scaler.transform(X_fps_test)
             
-            # Train model
+            # Train FPS model
             self.model = RandomForestRegressor(
                 n_estimators=100,
                 max_depth=10,
@@ -263,15 +304,48 @@ class MLAutoTuner:
                 n_jobs=-1
             )
             
-            self.model.fit(X_train_scaled, y_train)
+            self.model.fit(X_fps_train_scaled, y_fps_train)
             
-            # Evaluate
-            train_score = self.model.score(X_train_scaled, y_train)
-            test_score = self.model.score(X_test_scaled, y_test)
+            # Evaluate FPS model
+            train_score = self.model.score(X_fps_train_scaled, y_fps_train)
+            test_score = self.model.score(X_fps_test_scaled, y_fps_test)
             
-            logger.info(f"✓ Model trained: R²_train={train_score:.3f}, R²_test={test_score:.3f}")
+            logger.info(f"✓ FPS model trained: R²_train={train_score:.3f}, R²_test={test_score:.3f}")
             
-            # Save model
+            # Train stability model (only if we have both classes and enough samples)
+            if len(X_stability) >= 10:
+                X_stability = np.array(X_stability)
+                y_stability = np.array(y_stability)
+                
+                # Check if we have both classes
+                unique_labels = np.unique(y_stability)
+                if len(unique_labels) > 1:
+                    # Split stability data with stratification
+                    X_stab_train, X_stab_test, y_stab_train, y_stab_test = train_test_split(
+                        X_stability, y_stability, test_size=0.2, random_state=42, stratify=y_stability)
+                    
+                    # Use same scaler (already fitted on FPS data)
+                    X_stab_train_scaled = self.scaler.transform(X_stab_train)
+                    X_stab_test_scaled = self.scaler.transform(X_stab_test)
+                    
+                    from sklearn.linear_model import LogisticRegression
+                    self.stability_model = LogisticRegression(
+                        penalty='l2',
+                        C=1.0,
+                        max_iter=1000,
+                        random_state=42
+                    )
+                    
+                    self.stability_model.fit(X_stab_train_scaled, y_stab_train)
+                    
+                    stab_score = self.stability_model.score(X_stab_test_scaled, y_stab_test)
+                    logger.info(f"✓ Stability model trained: Accuracy={stab_score:.3f}")
+                else:
+                    logger.info("⚠️  Not enough diversity in stability labels, skipping stability model training")
+            else:
+                logger.info("⚠️  Not enough stability samples, skipping stability model training")
+            
+            # Save models
             self.save_model()
             
             return True
@@ -281,7 +355,7 @@ class MLAutoTuner:
             return False
     
     def _extract_features(self, sample: Dict) -> Optional[List[float]]:
-        """Extract numerical features from sample including DPC latency and stutter count"""
+        """Extract numerical features from sample including temperatures, driver version, and stability metrics"""
         try:
             features = []
             
@@ -303,15 +377,42 @@ class MLAutoTuner:
             features.append(1.0 if 'amd' in gpu or 'radeon' in gpu else 0.0)
             features.append(1.0 if 'intel' in gpu else 0.0)
             
-            # NEW: DPC latency (normalized to 0-1 range, 0=good, 1=bad)
+            # DPC latency (normalized to 0-1 range, 0=good, 1=bad)
             dpc_latency_us = float(sample.get('dpc_latency_avg_us', 0))
             # Normalize: 0-1000μs -> 0-1
             features.append(min(dpc_latency_us / 1000.0, 1.0))
             
-            # NEW: Stutter count (normalized, log scale to handle large values)
+            # Stutter count (normalized, log scale to handle large values)
             stutter_count = float(sample.get('stutter_count', 0))
             # Log normalize: helps with large outliers
             features.append(min(np.log1p(stutter_count) / 10.0, 1.0))
+            
+            # NEW: CPU temperature (normalized to 0-1, 0=cold, 1=hot)
+            cpu_temp = float(sample.get('cpu_temp_avg', 50))
+            # Normalize: 30-100°C -> 0-1
+            features.append(max(0.0, min((cpu_temp - 30) / 70.0, 1.0)))
+            
+            # NEW: GPU temperature (normalized to 0-1, 0=cold, 1=hot)
+            gpu_temp = float(sample.get('gpu_temp_avg', 50))
+            # Normalize: 30-100°C -> 0-1
+            features.append(max(0.0, min((gpu_temp - 30) / 70.0, 1.0)))
+            
+            # NEW: GPU driver version (encoded as hash to avoid version comparison issues)
+            # Use simple hash-based encoding for driver version as categorical feature
+            driver_version = sample.get('gpu_driver_version', '0.0')
+            try:
+                # Hash the driver version string and normalize to 0-1 range
+                # This treats each version as a unique category without assuming ordering
+                driver_hash = hash(driver_version) % 10000  # Mod to keep it reasonable
+                driver_numeric = driver_hash / 10000.0
+            except (ValueError, AttributeError, TypeError):
+                driver_numeric = 0.0
+            features.append(driver_numeric)
+            
+            # NEW: Max DPC latency (normalized, indicates worst-case stability)
+            dpc_latency_max_us = float(sample.get('dpc_latency_max_us', 0))
+            # Normalize: 0-2000μs -> 0-1
+            features.append(min(dpc_latency_max_us / 2000.0, 1.0))
             
             return features
             
@@ -394,4 +495,124 @@ class MLAutoTuner:
             
         except Exception as e:
             logger.debug(f"FPS prediction error: {e}")
+            return None
+    
+    def generate_ml_profile(self, game_exe: str, hardware_context: Dict[str, Any]) -> Optional[Any]:
+        """
+        Generate ML-optimized profile with dual-model prediction and safety filtering.
+        
+        Args:
+            game_exe: Game executable name
+            hardware_context: Dict with cpu_temp_avg, gpu_temp_avg, gpu_driver_version, etc.
+            
+        Returns:
+            GameProfile if safe and confident, None otherwise
+        """
+        if not SKLEARN_AVAILABLE or self.model is None or self.scaler is None:
+            logger.warning("ML models not available for profile generation")
+            return None
+        
+        try:
+            from config_loader import GameProfile
+            
+            # Test different optimization configurations
+            base_optimizations = ['cpu_optimizations_v3', 'timer', 'power_plan']
+            aggressive_optimizations = base_optimizations + ['gpu_clocks_locked', 'core_parking_disabled', 'network_qos', 'memory_purge']
+            conservative_optimizations = base_optimizations.copy()
+            
+            # Build sample with current hardware context
+            base_sample = {
+                'game_exe': game_exe,
+                'ram_gb': hardware_context.get('ram_gb', 16),
+                'gpu_model': hardware_context.get('gpu_model', 'nvidia'),
+                'cpu_temp_avg': hardware_context.get('cpu_temp_avg', 50),
+                'gpu_temp_avg': hardware_context.get('gpu_temp_avg', 50),
+                'gpu_driver_version': hardware_context.get('gpu_driver_version', '0.0'),
+                'dpc_latency_avg_us': hardware_context.get('dpc_latency_avg_us', 0),
+                'dpc_latency_max_us': hardware_context.get('dpc_latency_max_us', 0),
+            }
+            
+            # Predict FPS for aggressive config
+            aggressive_sample = {**base_sample, 'optimizations': aggressive_optimizations}
+            aggressive_features = self._extract_features(aggressive_sample)
+            
+            if not aggressive_features:
+                logger.warning("Failed to extract features for ML profile generation")
+                return None
+            
+            X_aggressive = np.array([aggressive_features])
+            X_aggressive_scaled = self.scaler.transform(X_aggressive)
+            
+            # Predict FPS
+            predicted_fps = self.model.predict(X_aggressive_scaled)[0]
+            
+            # Calculate confidence (variance from RandomForest)
+            confidence = 1.0  # Default high confidence
+            if hasattr(self.model, 'estimators_'):
+                # Get predictions from all trees
+                tree_predictions = [tree.predict(X_aggressive_scaled)[0] for tree in self.model.estimators_]
+                prediction_std = np.std(tree_predictions)
+                # High std = low confidence
+                confidence = max(0.0, 1.0 - (prediction_std / predicted_fps) if predicted_fps > 0 else 0.0)
+            
+            logger.info(f"ML prediction: {predicted_fps:.1f} FPS (confidence: {confidence:.2f})")
+            
+            # Predict stability risk
+            stability_risk = 0.0
+            if self.stability_model is not None:
+                try:
+                    # Get probability of instability (class 1)
+                    risk_proba = self.stability_model.predict_proba(X_aggressive_scaled)[0]
+                    stability_risk = risk_proba[1] if len(risk_proba) > 1 else 0.0
+                    logger.info(f"Stability risk: {stability_risk:.2f}")
+                except Exception as e:
+                    logger.debug(f"Stability prediction error: {e}")
+            
+            # Safety filters
+            use_conservative = False
+            
+            # Filter 1: High stability risk
+            if stability_risk > 0.6:
+                logger.warning("⚠️  High stability risk detected, using conservative profile")
+                use_conservative = True
+            
+            # Filter 2: Low confidence
+            if confidence < 0.5:
+                logger.warning("⚠️  Low prediction confidence, using conservative profile")
+                use_conservative = True
+            
+            # Filter 3: High GPU temperature (heuristic safety rule)
+            gpu_temp = hardware_context.get('gpu_temp_avg', 0)
+            if gpu_temp > 85:
+                logger.warning(f"⚠️  High GPU temperature ({gpu_temp}°C), disabling GPU clock locking")
+                use_conservative = True
+            
+            # Select optimization set
+            if use_conservative:
+                selected_opts = conservative_optimizations
+            else:
+                selected_opts = aggressive_optimizations
+            
+            # Build profile
+            profile = GameProfile(
+                name=f"ML Optimized - {game_exe}",
+                game_exe=game_exe,
+                timer_resolution_ms=0.5 if not use_conservative else 1.0,
+                memory_optimization_level=2 if 'memory_purge' in selected_opts else 1,
+                network_qos_enabled='network_qos' in selected_opts,
+                gpu_scheduling_enabled=True,
+                gpu_clock_locking='gpu_clocks_locked' in selected_opts and gpu_temp <= 85,
+                power_high_performance=True,
+                cpu_priority_class='HIGH',
+                disable_core_parking='core_parking_disabled' in selected_opts,
+                optimize_working_set=True,
+            )
+            
+            logger.info(f"✓ Generated {'conservative' if use_conservative else 'aggressive'} ML profile")
+            logger.info(f"  Optimizations: {', '.join(selected_opts)}")
+            
+            return profile
+            
+        except Exception as e:
+            logger.error(f"ML profile generation error: {e}")
             return None

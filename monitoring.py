@@ -76,6 +76,15 @@ class SessionTelemetry:
     # NEW: Context switch metrics
     context_switches_avg: float
     context_switch_spikes: int
+    
+    # NEW: Expanded telemetry for stability and dynamic context
+    cpu_temp_avg: float = 0.0
+    gpu_temp_avg: float = 0.0
+    frame_time_p999_ms: float = 0.0
+    dpc_latency_max_us: float = 0.0
+    
+    # NEW: Rollback tracking for ML training
+    optimization_failed: bool = False
 
 
 class PerformanceMonitor:
@@ -119,7 +128,10 @@ class PerformanceMonitor:
                     'memory_samples': deque(maxlen=600),
                     'dpc_readings': deque(maxlen=1000),
                     'context_switches': deque(maxlen=1000),  # NEW: Context switch tracking
-                    'active': True
+                    'cpu_temp_samples': deque(maxlen=600),  # NEW: CPU temperature tracking
+                    'gpu_temp_samples': deque(maxlen=600),  # NEW: GPU temperature tracking
+                    'active': True,
+                    'baseline_frame_time_p999': None  # NEW: Baseline for alerts
                 }
                 
                 self.active_sessions[pid] = session
@@ -141,12 +153,13 @@ class PerformanceMonitor:
                 return False
     
     def _monitor_loop(self, pid: int):
-        """Background monitoring loop with context switch tracking"""
+        """Background monitoring loop with context switch tracking and temperature monitoring"""
         
         try:
             process = psutil.Process(pid)
             last_frame_time = self._get_qpc_time()
             last_dpc_check = time.time()
+            last_temp_check = time.time()
             last_context_switches = None
             
             while True:
@@ -193,6 +206,19 @@ class PerformanceMonitor:
                         
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     break
+                
+                # Temperature check (every 10 seconds)
+                if time.time() - last_temp_check > 10:
+                    cpu_temp = self._measure_cpu_temperature()
+                    gpu_temp = self._measure_gpu_temperature()
+                    
+                    with self.lock:
+                        if cpu_temp is not None:
+                            session['cpu_temp_samples'].append(cpu_temp)
+                        if gpu_temp is not None:
+                            session['gpu_temp_samples'].append(gpu_temp)
+                    
+                    last_temp_check = time.time()
                 
                 # DPC latency check (every 5 seconds)
                 if time.time() - last_dpc_check > 5:
@@ -258,6 +284,49 @@ class PerformanceMonitor:
         
         # This is a placeholder - real implementation needs kernel tracing
         return "Unknown (enable kernel tracing for details)"
+    
+    def _measure_cpu_temperature(self) -> Optional[float]:
+        """
+        Measure CPU temperature using WMI.
+        Returns temperature in Celsius or None if unavailable.
+        """
+        try:
+            import wmi
+            w = wmi.WMI(namespace="root\\OpenHardwareMonitor")
+            temperature_infos = w.Sensor()
+            
+            for sensor in temperature_infos:
+                if sensor.SensorType == 'Temperature' and 'CPU' in sensor.Name:
+                    return float(sensor.Value)
+            
+            # Fallback: Try WMI MSAcpi_ThermalZoneTemperature
+            w2 = wmi.WMI(namespace="root\\wmi")
+            for temp in w2.MSAcpi_ThermalZoneTemperature():
+                # Convert from tenths of Kelvin to Celsius
+                kelvin = temp.CurrentTemperature / 10.0
+                celsius = kelvin - 273.15
+                return celsius
+        except Exception as e:
+            logger.debug(f"CPU temperature measurement failed: {e}")
+            return None
+    
+    def _measure_gpu_temperature(self) -> Optional[float]:
+        """
+        Measure GPU temperature using WMI or NVIDIA/AMD APIs.
+        Returns temperature in Celsius or None if unavailable.
+        """
+        try:
+            import wmi
+            w = wmi.WMI(namespace="root\\OpenHardwareMonitor")
+            temperature_infos = w.Sensor()
+            
+            for sensor in temperature_infos:
+                if sensor.SensorType == 'Temperature' and 'GPU' in sensor.Name:
+                    return float(sensor.Value)
+        except Exception as e:
+            logger.debug(f"GPU temperature measurement failed: {e}")
+        
+        return None
     
     def stop_monitoring(self, pid: int) -> bool:
         """Stop monitoring for a process"""
@@ -333,16 +402,71 @@ class PerformanceMonitor:
                     'cpu_usage_avg': statistics.mean(session['cpu_samples']) if session['cpu_samples'] else 0,
                     'memory_mb_avg': statistics.mean(session['memory_samples']) if session['memory_samples'] else 0,
                     'dpc_latency_avg_us': statistics.mean([r.latency_us for r in session['dpc_readings']]) if session['dpc_readings'] else 0,
+                    'dpc_latency_max_us': max([r.latency_us for r in session['dpc_readings']], default=0) if session['dpc_readings'] else 0,
                     'dpc_spikes_count': sum(1 for r in session['dpc_readings'] if r.latency_us > 500),
                     'context_switches_avg': statistics.mean(session['context_switches']) if session['context_switches'] else 0,
                     'context_switch_spikes': sum(1 for cs in session['context_switches'] if cs > 1000) if session['context_switches'] else 0,
+                    'cpu_temp_avg': statistics.mean(session['cpu_temp_samples']) if session['cpu_temp_samples'] else 0,
+                    'gpu_temp_avg': statistics.mean(session['gpu_temp_samples']) if session['gpu_temp_samples'] else 0,
                 }
+                
+                # Store baseline for alerts if not set
+                if session.get('baseline_frame_time_p999') is None:
+                    session['baseline_frame_time_p999'] = frame_time_p999
                 
                 return summary
                 
             except Exception as e:
                 logger.error(f"Summary calculation error: {e}")
                 return None
+    
+    def check_critical_alerts(self, pid: int) -> bool:
+        """
+        Check if critical performance alerts are triggered.
+        Returns True if optimization should be rolled back.
+        """
+        with self.lock:
+            if pid not in self.active_sessions:
+                return False
+            
+            session = self.active_sessions[pid]
+            
+            # Need at least 100 frames for meaningful analysis
+            if len(session['frame_times']) < 100:
+                return False
+            
+            try:
+                frame_times = list(session['frame_times'])
+                frame_times_sorted = sorted(frame_times)
+                n_frames = len(frame_times_sorted)
+                
+                # Calculate recent P99.9
+                p999_idx = int(n_frames * 0.999)
+                # Clamp index to valid range
+                p999_idx = min(p999_idx, n_frames - 1)
+                current_p999 = frame_times_sorted[p999_idx]
+                
+                # Check if baseline exists
+                baseline_p999 = session.get('baseline_frame_time_p999')
+                
+                # Alert 1: Frame time P99.9 exceeds baseline by 15%
+                if baseline_p999 and baseline_p999 > 0:
+                    if current_p999 > baseline_p999 * 1.15:
+                        logger.warning(f"⚠️  ALERT: Frame time P99.9 increased {((current_p999/baseline_p999 - 1)*100):.1f}% (baseline: {baseline_p999:.2f}ms, current: {current_p999:.2f}ms)")
+                        return True
+                
+                # Alert 2: DPC latency max exceeds 1500 µs
+                if session['dpc_readings']:
+                    max_dpc = max([r.latency_us for r in session['dpc_readings']])
+                    if max_dpc > 1500:
+                        logger.warning(f"⚠️  ALERT: DPC latency spike detected ({max_dpc:.0f}µs > 1500µs threshold)")
+                        return True
+                
+                return False
+                
+            except Exception as e:
+                logger.debug(f"Critical alerts check error: {e}")
+                return False
     
     def cleanup(self):
         """Stop all monitoring sessions"""
@@ -388,8 +512,8 @@ class TelemetryCollector:
                 'bios_version': self._get_bios_version(),
             }
     
-    def end_session(self, pid: int) -> Optional[SessionTelemetry]:
-        """End telemetry session and create final report"""
+    def end_session(self, pid: int, performance_metrics: Optional[Dict[str, Any]] = None, optimization_failed: bool = False) -> Optional[SessionTelemetry]:
+        """End telemetry session and create final report with performance metrics"""
         
         with self.lock:
             if pid not in self.active_sessions:
@@ -399,16 +523,37 @@ class TelemetryCollector:
             session_data['end_time'] = time.time()
             session_data['duration_seconds'] = session_data['end_time'] - session_data['start_time']
             
-            # Get performance metrics from PerformanceMonitor (would be passed in)
-            # For now, use placeholders
-            session_data['frame_metrics'] = None
-            session_data['cpu_usage_avg'] = 0.0
-            session_data['gpu_usage_avg'] = 0.0
-            session_data['memory_usage_avg_mb'] = 0.0
-            session_data['dpc_latency_avg_us'] = 0.0
-            session_data['dpc_spikes_count'] = 0
-            session_data['context_switches_avg'] = 0.0
-            session_data['context_switch_spikes'] = 0
+            # Get performance metrics from PerformanceMonitor if provided
+            if performance_metrics:
+                session_data['frame_metrics'] = None  # Would need to construct FrameMetrics object
+                session_data['cpu_usage_avg'] = performance_metrics.get('cpu_usage_avg', 0.0)
+                session_data['gpu_usage_avg'] = 0.0  # Not yet tracked in PerformanceMonitor
+                session_data['memory_usage_avg_mb'] = performance_metrics.get('memory_mb_avg', 0.0)
+                session_data['dpc_latency_avg_us'] = performance_metrics.get('dpc_latency_avg_us', 0.0)
+                session_data['dpc_latency_max_us'] = performance_metrics.get('dpc_latency_max_us', 0.0)
+                session_data['dpc_spikes_count'] = performance_metrics.get('dpc_spikes_count', 0)
+                session_data['context_switches_avg'] = performance_metrics.get('context_switches_avg', 0.0)
+                session_data['context_switch_spikes'] = performance_metrics.get('context_switch_spikes', 0)
+                session_data['cpu_temp_avg'] = performance_metrics.get('cpu_temp_avg', 0.0)
+                session_data['gpu_temp_avg'] = performance_metrics.get('gpu_temp_avg', 0.0)
+                session_data['frame_time_p999_ms'] = performance_metrics.get('frame_time_p999', 0.0)
+            else:
+                # Use placeholders if no metrics provided
+                session_data['frame_metrics'] = None
+                session_data['cpu_usage_avg'] = 0.0
+                session_data['gpu_usage_avg'] = 0.0
+                session_data['memory_usage_avg_mb'] = 0.0
+                session_data['dpc_latency_avg_us'] = 0.0
+                session_data['dpc_latency_max_us'] = 0.0
+                session_data['dpc_spikes_count'] = 0
+                session_data['context_switches_avg'] = 0.0
+                session_data['context_switch_spikes'] = 0
+                session_data['cpu_temp_avg'] = 0.0
+                session_data['gpu_temp_avg'] = 0.0
+                session_data['frame_time_p999_ms'] = 0.0
+            
+            # Track rollback status
+            session_data['optimization_failed'] = optimization_failed
             
             telemetry = SessionTelemetry(**session_data)
             self.completed_sessions.append(telemetry)

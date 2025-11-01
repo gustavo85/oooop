@@ -895,7 +895,62 @@ class GameOptimizer:
             
             return True
     
-    def stop_optimization(self, game_pid: int) -> bool:
+    def apply_safe_rollback(self, game_pid: int) -> bool:
+        """
+        Quickly revert optimizations when performance degradation is detected.
+        This is a fast rollback for safety, not a full cleanup.
+        """
+        with self.optimization_lock:
+            if game_pid not in self.active_optimizations:
+                return False
+            
+            state = self.active_optimizations[game_pid]
+            
+            logger.warning("=" * 80)
+            logger.warning(f"⚠️  ROLLBACK TRIGGERED for '{state.game_exe}' (PID: {game_pid})")
+            logger.warning("=" * 80)
+            
+            try:
+                # Revert most aggressive optimizations first
+                
+                # 1. Restore timer resolution
+                if 'timer' in state.optimizations_applied:
+                    self.timer_manager.restore_default_timer()
+                    state.optimizations_applied.discard('timer')
+                    logger.info("✓ Timer resolution restored")
+                
+                # 2. Unlock GPU clocks
+                if 'gpu_clocks_locked' in state.optimizations_applied:
+                    self.directx_optimizer.lock_gpu_clocks(enable=False)
+                    state.optimizations_applied.discard('gpu_clocks_locked')
+                    logger.info("✓ GPU clocks unlocked")
+                
+                # 3. Remove QoS policies
+                if 'network_qos' in state.optimizations_applied:
+                    self.network_optimizer.remove_qos_policy(game_pid)
+                    state.optimizations_applied.discard('network_qos')
+                    logger.info("✓ QoS policies removed")
+                
+                # 4. Restore core parking
+                if 'core_parking_disabled' in state.optimizations_applied:
+                    self.core_parking_manager.restore_core_parking()
+                    state.optimizations_applied.discard('core_parking_disabled')
+                    logger.info("✓ Core parking restored")
+                
+                # Mark as failed for telemetry
+                state.notes.append("Optimization rollback triggered (performance degradation)")
+                
+                logger.warning("=" * 80)
+                logger.warning("⚠️  ROLLBACK COMPLETE - Running in safe mode")
+                logger.warning("=" * 80)
+                
+                return True
+                
+            except Exception as e:
+                logger.error(f"Rollback error: {e}")
+                return False
+    
+    def stop_optimization(self, game_pid: int, optimization_failed: bool = False) -> bool:
         """Stop optimization and restore original settings"""
         
         with self.optimization_lock:
@@ -921,10 +976,14 @@ class GameOptimizer:
                 self.performance_monitor.stop_monitoring(game_pid)
                 logger.info("✓ Performance monitoring stopped")
             
-            # End telemetry session
-            telemetry_data = self.telemetry_collector.end_session(game_pid)
+            # End telemetry session with failure status if applicable
+            telemetry_data = self.telemetry_collector.end_session(
+                game_pid, 
+                performance_metrics=final_metrics,
+                optimization_failed=optimization_failed
+            )
             if telemetry_data:
-                # Train ML model with new data
+                # Train ML model with new data (failed sessions are filtered during training)
                 self.ml_tuner.add_training_sample(telemetry_data)
             
             # Restore in reverse order
@@ -1038,14 +1097,47 @@ class GameOptimizer:
         logger.info("✓ Game process monitoring started")
     
     def _monitor_loop(self):
-        """Background thread to monitor for new games and clean up terminated ones"""
+        """Background thread to monitor for new games, performance alerts, and clean up terminated ones"""
         known_game_exes = {
             p.game_exe.lower() for p in self.config_manager.game_profiles.values()
         }
         
+        rollback_triggered = set()  # Track which PIDs have already triggered rollback
+        session_start_times = {}  # Track when each session started
+        
         while self.monitor_active:
             with self.optimization_lock:
                 active_pids = set(self.active_optimizations.keys())
+                # Track session start times
+                for pid in active_pids:
+                    if pid not in session_start_times:
+                        session_start_times[pid] = time.time()
+            
+            # Check for critical alerts on active sessions
+            current_time = time.time()
+            for pid in list(active_pids):
+                if pid in rollback_triggered:
+                    continue  # Already rolled back, skip
+                
+                # Skip checking if session is too new (< 30 seconds - need baseline)
+                session_age = current_time - session_start_times.get(pid, current_time)
+                if session_age < 30:
+                    continue
+                
+                # Check if critical performance degradation detected
+                if self.performance_monitor.check_critical_alerts(pid):
+                    logger.warning(f"⚠️  Critical performance alert for PID {pid}!")
+                    
+                    # Trigger rollback
+                    if self.apply_safe_rollback(pid):
+                        rollback_triggered.add(pid)
+                        logger.warning(f"⚠️  Rollback executed for PID {pid}")
+                        
+                        # Mark the session as failed
+                        with self.optimization_lock:
+                            if pid in self.active_optimizations:
+                                state = self.active_optimizations[pid]
+                                state.notes.append("Optimization Failed (Rollback)")
             
             # Auto-detect new games
             if self.config_manager.get_global_setting('auto_detect_games', True):
@@ -1063,7 +1155,13 @@ class GameOptimizer:
             for pid in list(active_pids):
                 if not psutil.pid_exists(pid):
                     logger.info(f"Game with PID {pid} terminated, cleaning up...")
-                    self.stop_optimization(pid)
+                    # Pass optimization_failed=True if rollback was triggered
+                    failed = pid in rollback_triggered
+                    self.stop_optimization(pid, optimization_failed=failed)
+                    if pid in rollback_triggered:
+                        rollback_triggered.remove(pid)
+                    if pid in session_start_times:
+                        del session_start_times[pid]
             
             time.sleep(10)
     
