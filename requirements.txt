@@ -6,10 +6,23 @@ matplotlib>=3.5.0,<4.0.0       # Visualization and graphs
 scikit-learn>=1.0.0,<2.0.0     # Machine learning
 numpy>=1.21.0,<2.0.0           # Numerical computing
 
-# Optional dependencies for enhanced features
-# PyQt6>=6.4.0,<7.0.0          # Modern GUI framework (future upgrade)
-# XGBoost>=1.7.0,<2.0.0        # Advanced ML (planned)
-# shap>=0.41.0,<1.0.0          # Explainable AI (planned)
+# Enhanced GUI dependencies
+PyQt6>=6.4.0,<7.0.0            # Modern GUI framework with dark theme support
+PyQt6-Charts>=6.4.0,<7.0.0     # Advanced charts and visualizations
+
+# Advanced ML dependencies
+xgboost>=1.7.0,<3.0.0          # Advanced gradient boosting for neural networks
+shap>=0.42.0,<1.0.0            # Explainable AI (SHAP values)
+joblib>=1.2.0,<2.0.0           # Model persistence and caching
+
+# Multi-language support
+polib>=1.1.0,<2.0.0            # PO file handling for translations
+babel>=2.11.0,<3.0.0           # Internationalization utilities
+
+# Additional utilities
+requests>=2.28.0,<3.0.0        # HTTP library for game launcher APIs
+vdf>=3.4,<4.0                  # Valve Data Format parser for Steam
+winreg-unicode>=1.0,<2.0; platform_system=="Windows"  # Registry access
 
 # Development dependencies (uncomment for development)
 # pytest>=7.0.0,<8.0.0         # Testing framework
