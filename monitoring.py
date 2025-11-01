@@ -1,6 +1,7 @@
 """
 Performance Monitoring V4.0 - Real ETW Frame Time + DPC Latency + Telemetry + A/B Testing
 NEW V4.0: Real ETW implementation via etw_monitor.py module
+NEW V4.1: Memory-mapped files for high-frequency telemetry
 """
 
 import ctypes
@@ -9,6 +10,8 @@ import time
 import json
 import threading
 import statistics
+import queue
+import mmap
 from ctypes import wintypes
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -28,6 +31,146 @@ except ImportError:
     logger.warning("⚠️ Real ETW monitoring not available, using fallback mode")
     ETWFrameTimeMonitor = None
     ETWDPCLatencyMonitor = None
+
+
+class MemoryMappedTelemetry:
+    """
+    Memory-mapped file for high-frequency telemetry writes.
+    Reduces I/O overhead by writing to shared memory instead of disk.
+    """
+    
+    def __init__(self, size_mb: int = 10):
+        self.size = size_mb * 1024 * 1024  # Convert MB to bytes
+        self.mmap_file = None
+        self.file_handle = None
+        self.write_offset = 0
+        self.lock = threading.Lock()
+        
+        self.telemetry_dir = Path.home() / '.game_optimizer' / 'telemetry'
+        self.telemetry_dir.mkdir(parents=True, exist_ok=True)
+        self.mmap_path = self.telemetry_dir / 'telemetry_mmap.dat'
+    
+    def initialize(self) -> bool:
+        """Initialize memory-mapped file"""
+        try:
+            # Create or open file
+            self.file_handle = open(self.mmap_path, 'r+b' if self.mmap_path.exists() else 'w+b')
+            
+            # Resize file if needed
+            if self.mmap_path.stat().st_size < self.size:
+                self.file_handle.truncate(self.size)
+            
+            # Create memory map
+            self.mmap_file = mmap.mmap(self.file_handle.fileno(), self.size)
+            
+            logger.info(f"✓ Memory-mapped telemetry initialized ({self.size // (1024*1024)} MB)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize memory-mapped telemetry: {e}")
+            return False
+    
+    def write_event(self, event_data: bytes) -> bool:
+        """Write telemetry event to memory-mapped file"""
+        if not self.mmap_file:
+            return False
+        
+        try:
+            with self.lock:
+                # Check if we have space
+                if self.write_offset + len(event_data) + 4 > self.size:
+                    # Reset to beginning (circular buffer)
+                    self.write_offset = 0
+                
+                # Write length prefix (4 bytes)
+                self.mmap_file.seek(self.write_offset)
+                self.mmap_file.write(len(event_data).to_bytes(4, byteorder='little'))
+                
+                # Write data
+                self.mmap_file.write(event_data)
+                
+                self.write_offset += 4 + len(event_data)
+                
+                # Flush to ensure visibility
+                self.mmap_file.flush()
+                
+                return True
+                
+        except Exception as e:
+            logger.debug(f"Memory-mapped write error: {e}")
+            return False
+    
+    def write_json_event(self, event_dict: Dict[str, Any]) -> bool:
+        """Write JSON event to memory-mapped file"""
+        try:
+            json_bytes = json.dumps(event_dict, separators=(',', ':')).encode('utf-8')
+            return self.write_event(json_bytes)
+        except Exception as e:
+            logger.debug(f"JSON serialization error: {e}")
+            return False
+    
+    def flush_to_disk(self, output_file: Optional[Path] = None) -> bool:
+        """Flush memory-mapped data to persistent file"""
+        if not self.mmap_file:
+            return False
+        
+        try:
+            if output_file is None:
+                output_file = self.telemetry_dir / f'telemetry_{int(time.time())}.jsonl'
+            
+            # Read all events from mmap
+            events = []
+            offset = 0
+            
+            self.mmap_file.seek(0)
+            while offset < self.write_offset:
+                # Read length
+                length_bytes = self.mmap_file.read(4)
+                if len(length_bytes) < 4:
+                    break
+                
+                length = int.from_bytes(length_bytes, byteorder='little')
+                if length == 0 or length > self.size:
+                    break
+                
+                # Read data
+                data = self.mmap_file.read(length)
+                if len(data) < length:
+                    break
+                
+                try:
+                    event = json.loads(data.decode('utf-8'))
+                    events.append(event)
+                except Exception:
+                    pass
+                
+                offset += 4 + length
+            
+            # Write to file
+            with open(output_file, 'w', encoding='utf-8') as f:
+                for event in events:
+                    f.write(json.dumps(event) + '\n')
+            
+            logger.info(f"✓ Flushed {len(events)} events to {output_file}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Flush to disk error: {e}")
+            return False
+    
+    def cleanup(self):
+        """Cleanup memory-mapped file"""
+        try:
+            if self.mmap_file:
+                self.mmap_file.close()
+                self.mmap_file = None
+            
+            if self.file_handle:
+                self.file_handle.close()
+                self.file_handle = None
+                
+        except Exception as e:
+            logger.debug(f"Cleanup error: {e}")
 
 
 @dataclass
@@ -105,12 +248,23 @@ class PerformanceMonitor:
     """
     Real-time performance monitoring using ETW (when available) or fallback to QPC
     V4.0: Integrated with real ETW frame time and DPC latency monitors
+    V4.1: Enhanced with RLock for reentrant operations and lock-free queues
     """
     
     def __init__(self):
         self.active_sessions: Dict[int, Dict[str, Any]] = {}
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()  # Changed to RLock for reentrant locking
         self.monitor_threads: Dict[int, threading.Thread] = {}
+        
+        # Lock-free queue for telemetry events
+        self.telemetry_queue: queue.Queue = queue.Queue(maxsize=10000)
+        
+        # Memory-mapped telemetry for high-frequency writes
+        self.mmap_telemetry = MemoryMappedTelemetry(size_mb=10)
+        try:
+            self.mmap_telemetry.initialize()
+        except Exception as e:
+            logger.warning(f"Memory-mapped telemetry not available: {e}")
         
         # ETW monitors (V4.0)
         self.etw_frame_monitor: Optional[Any] = None
@@ -447,6 +601,23 @@ class PerformanceMonitor:
         logger.info(f"✓ Performance monitoring stopped for PID {pid}")
         return True
     
+    def _queue_telemetry_event(self, event_type: str, event_data: Dict[str, Any]):
+        """Queue telemetry event using lock-free queue for better performance"""
+        try:
+            event = {
+                'timestamp': time.time(),
+                'type': event_type,
+                'data': event_data
+            }
+            self.telemetry_queue.put_nowait(event)
+        except queue.Full:
+            # Queue is full, drop oldest event
+            try:
+                self.telemetry_queue.get_nowait()
+                self.telemetry_queue.put_nowait(event)
+            except queue.Empty:
+                pass
+    
     def get_session_summary(self, pid: int) -> Optional[Dict[str, Any]]:
         """Get summary metrics for a session"""
         
@@ -601,6 +772,14 @@ class PerformanceMonitor:
                 self.etw_dpc_monitor.stop()
             except Exception as e:
                 logger.debug(f"ETW DPC monitor cleanup error: {e}")
+        
+        # Flush and cleanup memory-mapped telemetry
+        if self.mmap_telemetry:
+            try:
+                self.mmap_telemetry.flush_to_disk()
+                self.mmap_telemetry.cleanup()
+            except Exception as e:
+                logger.debug(f"Memory-mapped telemetry cleanup error: {e}")
         
         self.active_sessions.clear()
         self.monitor_threads.clear()
