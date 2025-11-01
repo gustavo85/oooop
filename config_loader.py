@@ -40,6 +40,8 @@ class GameProfile:
     qos_rules: List[QoSRule] = field(default_factory=list)
     nic_rss_auto: bool = True
     nic_rss_max_processors: Optional[int] = None
+    disable_nagle: bool = False  # NEW: Disable Nagle's algorithm for lower latency
+    tcp_buffer_tuning: bool = False  # NEW: Tune TCP buffer sizes
     
     # GPU
     gpu_scheduling_enabled: bool = True

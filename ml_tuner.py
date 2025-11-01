@@ -420,10 +420,11 @@ class MLAutoTuner:
             logger.debug(f"Feature extraction error: {e}")
             return None
     
-    def get_optimized_profile(self, game_exe: str) -> Optional[Any]:
+    def get_optimized_profile(self, game_exe: str):
         """
         Get ML-optimized profile for a game.
-        Returns GameProfile if prediction is confident, else None.
+        Returns tuple (GameProfile, confidence: float) if prediction is confident, else None.
+        confidence is between 0.0 and 1.0.
         """
         if not SKLEARN_AVAILABLE or self.model is None:
             return None
@@ -462,7 +463,18 @@ class MLAutoTuner:
                 optimize_working_set=True,
             )
             
-            return profile
+            # Calculate confidence based on number of samples and variance
+            num_samples = len(game_samples)
+            if num_samples >= 10:
+                # High confidence if we have many samples
+                confidence = min(0.95, 0.6 + (num_samples - 10) * 0.05)
+            elif num_samples >= 5:
+                confidence = 0.7
+            else:
+                confidence = 0.5  # Low confidence with few samples
+            
+            # Return tuple (profile, confidence)
+            return (profile, confidence)
             
         except Exception as e:
             logger.error(f"ML profile generation error: {e}")
@@ -497,20 +509,25 @@ class MLAutoTuner:
             logger.debug(f"FPS prediction error: {e}")
             return None
     
-    def generate_ml_profile(self, game_exe: str, hardware_context: Dict[str, Any]) -> Optional[Any]:
+    def generate_ml_profile(self, game_exe: str, hardware_context: Dict[str, Any] = None):
         """
         Generate ML-optimized profile with dual-model prediction and safety filtering.
         
         Args:
             game_exe: Game executable name
-            hardware_context: Dict with cpu_temp_avg, gpu_temp_avg, gpu_driver_version, etc.
+            hardware_context: Optional dict with cpu_temp_avg, gpu_temp_avg, gpu_driver_version, etc.
             
         Returns:
-            GameProfile if safe and confident, None otherwise
+            Tuple (GameProfile, confidence: float) if safe and confident, None otherwise
+            confidence is between 0.0 and 1.0
         """
         if not SKLEARN_AVAILABLE or self.model is None or self.scaler is None:
             logger.warning("ML models not available for profile generation")
             return None
+        
+        # Use default hardware context if not provided
+        if hardware_context is None:
+            hardware_context = {}
         
         try:
             from config_loader import GameProfile
@@ -547,13 +564,18 @@ class MLAutoTuner:
             predicted_fps = self.model.predict(X_aggressive_scaled)[0]
             
             # Calculate confidence (variance from RandomForest)
-            confidence = 1.0  # Default high confidence
+            confidence = 0.75  # Default good confidence
             if hasattr(self.model, 'estimators_'):
                 # Get predictions from all trees
                 tree_predictions = [tree.predict(X_aggressive_scaled)[0] for tree in self.model.estimators_]
                 prediction_std = np.std(tree_predictions)
                 # High std = low confidence
-                confidence = max(0.0, 1.0 - (prediction_std / predicted_fps) if predicted_fps > 0 else 0.0)
+                if predicted_fps > 0:
+                    # Normalize std to get confidence (lower std = higher confidence)
+                    variance_ratio = prediction_std / predicted_fps
+                    confidence = max(0.0, min(1.0, 1.0 - variance_ratio))
+                else:
+                    confidence = 0.5
             
             logger.info(f"ML prediction: {predicted_fps:.1f} FPS (confidence: {confidence:.2f})")
             
@@ -565,6 +587,9 @@ class MLAutoTuner:
                     risk_proba = self.stability_model.predict_proba(X_aggressive_scaled)[0]
                     stability_risk = risk_proba[1] if len(risk_proba) > 1 else 0.0
                     logger.info(f"Stability risk: {stability_risk:.2f}")
+                    
+                    # Adjust confidence based on stability risk
+                    confidence = confidence * (1.0 - stability_risk * 0.5)  # Reduce confidence if high risk
                 except Exception as e:
                     logger.debug(f"Stability prediction error: {e}")
             
@@ -575,6 +600,7 @@ class MLAutoTuner:
             if stability_risk > 0.6:
                 logger.warning("⚠️  High stability risk detected, using conservative profile")
                 use_conservative = True
+                confidence = min(confidence, 0.6)  # Cap confidence
             
             # Filter 2: Low confidence
             if confidence < 0.5:
@@ -586,6 +612,7 @@ class MLAutoTuner:
             if gpu_temp > 85:
                 logger.warning(f"⚠️  High GPU temperature ({gpu_temp}°C), disabling GPU clock locking")
                 use_conservative = True
+                confidence = min(confidence, 0.5)  # Reduce confidence
             
             # Select optimization set
             if use_conservative:
@@ -608,10 +635,14 @@ class MLAutoTuner:
                 optimize_working_set=True,
             )
             
-            logger.info(f"✓ Generated {'conservative' if use_conservative else 'aggressive'} ML profile")
+            logger.info(f"✓ Generated {'conservative' if use_conservative else 'aggressive'} ML profile (confidence: {confidence:.2f})")
             logger.info(f"  Optimizations: {', '.join(selected_opts)}")
             
-            return profile
+            # Ensure confidence is in valid range [0.0, 1.0]
+            confidence = max(0.0, min(1.0, confidence))
+            
+            # Return tuple (profile, confidence)
+            return (profile, confidence)
             
         except Exception as e:
             logger.error(f"ML profile generation error: {e}")
