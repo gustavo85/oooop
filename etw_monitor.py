@@ -25,6 +25,15 @@ import struct
 
 logger: logging.Logger = logging.getLogger(__name__)
 
+# Windows-specific constants and structures
+# Note: This module is designed for Windows only and will have limited functionality on other platforms
+try:
+    # Ensure we're on Windows
+    if not hasattr(wintypes, 'LARGE_INTEGER'):
+        logger.warning("wintypes not fully available - running in compatibility mode")
+except Exception as e:
+    logger.warning(f"Windows types not available: {e}")
+
 # ETW Constants
 ERROR_SUCCESS = 0
 ERROR_ACCESS_DENIED = 5
@@ -162,8 +171,12 @@ class EVENT_TRACE_LOGFILE(ctypes.Structure):
     pass
 
 
-# Callback type
-EVENT_RECORD_CALLBACK = ctypes.WINFUNCTYPE(None, ctypes.POINTER(EVENT_RECORD))
+# Callback type (Windows-specific WINFUNCTYPE or CFUNCTYPE for cross-platform testing)
+try:
+    EVENT_RECORD_CALLBACK = ctypes.WINFUNCTYPE(None, ctypes.POINTER(EVENT_RECORD))
+except AttributeError:
+    # Fallback for non-Windows platforms (testing purposes)
+    EVENT_RECORD_CALLBACK = ctypes.CFUNCTYPE(None, ctypes.POINTER(EVENT_RECORD))
 
 
 EVENT_TRACE_LOGFILE._fields_ = [
