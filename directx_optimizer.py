@@ -1,5 +1,6 @@
 """
-DirectX/GPU Optimizer V3.5
+DirectX/GPU Optimizer V4.0
+ADDED V4.0: Native GPU control via NVAPI/ADL (gpu_native_control.py)
 ADDED: Real GPU clock locking (NVIDIA/AMD), MSI Mode fixed, DirectStorage validation
 FIXED: MSI Mode now filters only GPUs, saves original state
 """
@@ -21,6 +22,16 @@ from typing import Dict, List, Optional, Tuple, Any
 import psutil
 
 logger = logging.getLogger(__name__)
+
+# Try to import native GPU controller
+try:
+    from gpu_native_control import NativeGPUController
+    NATIVE_GPU_CONTROL_AVAILABLE = True
+    logger.info("✓ Native GPU control available (NVAPI/ADL)")
+except ImportError:
+    NATIVE_GPU_CONTROL_AVAILABLE = False
+    logger.warning("⚠️ Native GPU control not available, using fallback methods")
+    NativeGPUController = None
 
 # DXGI Constants
 DXGI_SWAP_EFFECT_FLIP_DISCARD = 4
@@ -51,7 +62,7 @@ class ShaderCacheInfo:
 
 
 class DirectXOptimizer:
-    """DirectX/GPU optimizer with real clock locking and fixed MSI Mode"""
+    """DirectX/GPU optimizer with native clock locking (V4.0) and MSI Mode"""
     
     def __init__(self):
         self.dxgi_dll = None
@@ -80,9 +91,30 @@ class DirectXOptimizer:
         self._gpu_clocks_locked = False
         self._original_gpu_state: Dict[str, Any] = {}
         
+        # V4.0: Native GPU controller
+        self.native_gpu_controller: Optional[Any] = None
+        self.use_native_gpu_control = NATIVE_GPU_CONTROL_AVAILABLE
+        
+        # Initialize native GPU controller if available
+        if self.use_native_gpu_control and NativeGPUController:
+            try:
+                self.native_gpu_controller = NativeGPUController()
+                if self.native_gpu_controller.initialize():
+                    self._gpu_vendor = self.native_gpu_controller.vendor
+                    logger.info(f"✓ Native GPU control initialized ({self._gpu_vendor})")
+                else:
+                    logger.info("Native GPU controller available but no supported GPU found")
+                    self.use_native_gpu_control = False
+            except Exception as e:
+                logger.warning(f"Native GPU controller init failed: {e}, using fallback")
+                self.use_native_gpu_control = False
+        
         self._detect_capabilities()
         self._find_shader_caches()
-        self._detect_gpu_vendor()
+        
+        # Detect GPU vendor if not already set by native controller
+        if not self._gpu_vendor:
+            self._detect_gpu_vendor()
     
     def _detect_gpu_vendor(self):
         """Detect GPU vendor (NVIDIA/AMD/Intel)"""
@@ -376,12 +408,27 @@ class DirectXOptimizer:
     
     def lock_gpu_clocks(self, enable: bool = True) -> Tuple[str, bool]:
         """
-        NEW V3.5: Lock GPU clocks to maximum for consistent performance.
+        V4.0: Lock GPU clocks to maximum using native APIs when available.
+        Falls back to nvidia-smi/registry methods if native control unavailable.
         Returns: (vendor, success)
         """
         if not enable:
             return self._unlock_gpu_clocks()
         
+        # V4.0: Try native GPU control first
+        if self.use_native_gpu_control and self.native_gpu_controller:
+            try:
+                vendor, success = self.native_gpu_controller.lock_clocks_to_max()
+                if success:
+                    self._gpu_clocks_locked = True
+                    logger.info(f"✓ GPU clocks locked via native {vendor} API")
+                    return (vendor, True)
+                else:
+                    logger.warning(f"Native {vendor} clock locking failed, trying fallback")
+            except Exception as e:
+                logger.warning(f"Native GPU control error: {e}, trying fallback")
+        
+        # Fallback to original methods
         if not self._gpu_vendor:
             logger.warning("GPU vendor not detected, cannot lock clocks")
             return ("Unknown", False)
@@ -562,10 +609,22 @@ class DirectXOptimizer:
             return ("AMD", False)
     
     def _unlock_gpu_clocks(self) -> Tuple[str, bool]:
-        """Restore original GPU clock settings"""
+        """V4.0: Restore original GPU clock settings (native or fallback)"""
         if not self._gpu_clocks_locked:
             return (self._gpu_vendor or "Unknown", True)
         
+        # V4.0: Try native GPU control first
+        if self.use_native_gpu_control and self.native_gpu_controller:
+            try:
+                vendor, success = self.native_gpu_controller.unlock_clocks()
+                if success:
+                    self._gpu_clocks_locked = False
+                    logger.info(f"✓ {vendor} GPU clocks restored via native API")
+                    return (vendor, True)
+            except Exception as e:
+                logger.warning(f"Native GPU unlock error: {e}, trying fallback")
+        
+        # Fallback to original methods
         try:
             method = self._original_gpu_state.get('method')
             
@@ -915,11 +974,19 @@ class DirectXOptimizer:
             return False
     
     def cleanup(self):
-        """Cleanup all optimizations"""
+        """V4.0: Cleanup all optimizations including native GPU controller"""
         try:
             # Unlock GPU clocks
             if self._gpu_clocks_locked:
                 self._unlock_gpu_clocks()
+            
+            # Cleanup native GPU controller
+            if self.use_native_gpu_control and self.native_gpu_controller:
+                try:
+                    self.native_gpu_controller.cleanup()
+                    logger.info("✓ Native GPU controller cleaned up")
+                except Exception as e:
+                    logger.debug(f"Native GPU controller cleanup error: {e}")
             
             # Restore registry
             if self.optimizations_applied:
