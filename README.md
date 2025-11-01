@@ -430,16 +430,20 @@ In safe mode:
 
 ### Planned 🚧
 
-- [ ] PyQt6 GUI (modern UI)
 - [ ] Cloud configuration sync
-- [ ] Automated benchmarking
-- [ ] Game launcher integration
-- [ ] Multi-language support
 - [ ] Video tutorials in GUI
-- [ ] Advanced shader cache management
-- [ ] Power delivery optimization (PL1/PL2)
-- [ ] Neural network for complex patterns
-- [ ] Explainable AI (SHAP values)
+- [ ] Automated game-specific presets
+
+### Completed in V4.0 ✅
+
+- [x] PyQt6 GUI (modern UI)
+- [x] Automated benchmarking
+- [x] Game launcher integration
+- [x] Multi-language support
+- [x] Advanced shader cache management
+- [x] Power delivery optimization (PL1/PL2)
+- [x] Neural network for complex patterns
+- [x] Explainable AI (SHAP values)
 
 ---
 
