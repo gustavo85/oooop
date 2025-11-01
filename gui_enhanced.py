@@ -542,16 +542,61 @@ class EnhancedGameOptimizerGUI:
     
     def _create_profiles_tab(self):
         """Create enhanced game profiles tab"""
-        # Import from original gui_config.py
-        from gui_config import GameOptimizerGUI
-        
-        # Use the original profiles tab implementation
         profiles_tab = ttk.Frame(self.notebook)
         self.notebook.add(profiles_tab, text="🎮 Game Profiles")
         
-        # TODO: Copy profiles tab implementation from gui_config.py
-        ttk.Label(profiles_tab, text="Game Profiles (Full implementation from gui_config.py)",
-                 font=('Arial', 12)).pack(pady=20)
+        # Note: Full profiles implementation would be imported from gui_config.py
+        # For now, provide a basic interface
+        ttk.Label(profiles_tab, text="Game Profiles Management", 
+                 font=('Arial', 14, 'bold')).pack(pady=20)
+        
+        # Profile list
+        list_frame = ttk.LabelFrame(profiles_tab, text="Existing Profiles", padding=10)
+        list_frame.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # Simple profile listbox
+        self.profile_listbox = tk.Listbox(list_frame, height=15, font=('Arial', 10))
+        self.profile_listbox.pack(fill='both', expand=True, pady=5)
+        
+        # Refresh profile list
+        self._refresh_profile_list_simple()
+        
+        # Buttons
+        btn_frame = ttk.Frame(list_frame)
+        btn_frame.pack(fill='x', pady=5)
+        
+        ttk.Button(btn_frame, text="New Profile", command=self._new_profile_simple).pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="Edit Selected", command=self._edit_profile_simple).pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="Delete", command=self._delete_profile_simple).pack(side='left', padx=5)
+    
+    def _refresh_profile_list_simple(self):
+        """Refresh the simple profile list"""
+        self.profile_listbox.delete(0, tk.END)
+        for game_exe, profile in sorted(self.config_manager.game_profiles.items()):
+            self.profile_listbox.insert(tk.END, f"{profile.name} ({game_exe})")
+    
+    def _new_profile_simple(self):
+        """Simple new profile dialog"""
+        messagebox.showinfo("New Profile", "Use Process Explorer tab to create profiles from running games")
+    
+    def _edit_profile_simple(self):
+        """Simple edit profile dialog"""
+        messagebox.showinfo("Edit Profile", "Profile editing - To be implemented")
+    
+    def _delete_profile_simple(self):
+        """Simple delete profile"""
+        selection = self.profile_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select a profile to delete")
+            return
+        
+        idx = selection[0]
+        profile_key = list(sorted(self.config_manager.game_profiles.keys()))[idx]
+        
+        if messagebox.askyesno("Confirm", f"Delete profile '{profile_key}'?"):
+            self.config_manager.delete_game_profile(profile_key)
+            self._refresh_profile_list_simple()
+            messagebox.showinfo("Success", "Profile deleted")
     
     def _create_system_monitor_tab(self):
         """Create built-in system monitor tab"""

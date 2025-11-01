@@ -74,7 +74,6 @@ def retry_on_exception(
 def error_handler(
     operation_name: str,
     reraise: bool = False,
-    default_return: Any = None,
     log_level: int = logging.ERROR
 ):
     """
@@ -83,14 +82,15 @@ def error_handler(
     Args:
         operation_name: Name of the operation for logging
         reraise: Whether to reraise the exception after logging
-        default_return: Default value to return on error (only used if reraise=False)
         log_level: Logging level for errors
         
     Example:
-        with error_handler("GPU initialization", reraise=False, default_return=False):
+        with error_handler("GPU initialization", reraise=False):
             # Code that might fail
             initialize_gpu()
-            return True
+            # Continue execution even if exception occurs
+    
+    Note: This does not return a value. To handle return values, use try-except directly.
     """
     try:
         yield
@@ -103,8 +103,11 @@ def error_handler(
         
         if reraise:
             raise
-        
-        return default_return
+
+
+class CircuitBreakerOpenError(Exception):
+    """Exception raised when circuit breaker is open"""
+    pass
 
 
 class CircuitBreaker:
@@ -156,13 +159,14 @@ class CircuitBreaker:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             if self.state == self.OPEN:
-                if time.time() - self.last_failure_time >= self.timeout:
+                if self.last_failure_time and time.time() - self.last_failure_time >= self.timeout:
                     logger.info(f"Circuit breaker for {func.__name__} entering HALF_OPEN state")
                     self.state = self.HALF_OPEN
                 else:
-                    raise Exception(
+                    time_remaining = self.timeout - (time.time() - self.last_failure_time) if self.last_failure_time else self.timeout
+                    raise CircuitBreakerOpenError(
                         f"Circuit breaker OPEN for {func.__name__}. "
-                        f"Try again in {self.timeout - (time.time() - self.last_failure_time):.0f}s"
+                        f"Try again in {time_remaining:.0f}s"
                     )
             
             try:
@@ -432,10 +436,9 @@ if __name__ == "__main__":
     
     # Example 2: Error handler
     print("\n=== Example 2: Error Handler ===")
-    with error_handler("test operation", reraise=False, default_return=False):
+    with error_handler("test operation", reraise=False):
         print("This will succeed")
-        result = True
-    print(f"Result: {result}")
+    print("Operation completed")
     
     # Example 3: Circuit breaker
     print("\n=== Example 3: Circuit Breaker ===")

@@ -1,19 +1,19 @@
 # Game Optimizer V4.0 - Python Dependencies
 
-# Core dependencies
-psutil>=5.9.0           # System and process utilities
-matplotlib>=3.5.0       # Visualization and graphs
-scikit-learn>=1.0.0     # Machine learning
-numpy>=1.21.0           # Numerical computing
+# Core dependencies (pinned for stability)
+psutil>=5.9.0,<6.0.0           # System and process utilities
+matplotlib>=3.5.0,<4.0.0       # Visualization and graphs
+scikit-learn>=1.0.0,<2.0.0     # Machine learning
+numpy>=1.21.0,<2.0.0           # Numerical computing
 
 # Optional dependencies for enhanced features
-# PyQt6>=6.4.0          # Modern GUI framework (future upgrade)
-# XGBoost>=1.7.0        # Advanced ML (planned)
-# shap>=0.41.0          # Explainable AI (planned)
+# PyQt6>=6.4.0,<7.0.0          # Modern GUI framework (future upgrade)
+# XGBoost>=1.7.0,<2.0.0        # Advanced ML (planned)
+# shap>=0.41.0,<1.0.0          # Explainable AI (planned)
 
 # Development dependencies (uncomment for development)
-# pytest>=7.0.0         # Testing framework
-# pytest-cov>=3.0.0     # Test coverage
-# black>=22.0.0         # Code formatting
-# flake8>=4.0.0         # Linting
-# mypy>=0.9.0           # Type checking
+# pytest>=7.0.0,<8.0.0         # Testing framework
+# pytest-cov>=3.0.0,<4.0.0     # Test coverage
+# black>=22.0.0,<23.0.0        # Code formatting
+# flake8>=4.0.0,<5.0.0         # Linting
+# mypy>=0.9.0,<1.0.0           # Type checking
