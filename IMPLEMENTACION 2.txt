@@ -1,0 +1,760 @@
+
+---
+
+## 📦 ARCHIVO CRÍTICO: `ml_pipeline.py` (STARTER TEMPLATE)
+
+Aquí te doy el archivo **principal** que debes agregar al repositorio. El agente de código lo expandirá:
+
+```python
+"""
+ml_pipeline.py - Sistema de Machine Learning Profesional V5.0
+Autor: Game Optimizer Team
+Fecha: 2025-11-01
+
+Sistema completo de ML que reemplaza neural_network_optimizer.py
+Incluye: Deep Learning, Gradient Boosting, RL, AutoML, Explainability
+"""
+
+import logging
+import json
+import pickle
+import time
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple, Union
+from dataclasses import dataclass, field
+from enum import Enum
+import warnings
+warnings.filterwarnings('ignore')
+
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split, KFold, StratifiedKFold
+from sklearn.preprocessing import StandardScaler, RobustScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, f1_score
+
+# Deep Learning
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.utils.data import Dataset, DataLoader
+    PYTORCH_AVAILABLE = True
+except ImportError:
+    PYTORCH_AVAILABLE = False
+
+# Gradient Boosting
+try:
+    import xgboost as xgb
+    import lightgbm as lgb
+    from catboost import CatBoostRegressor, CatBoostClassifier
+    BOOSTING_AVAILABLE = True
+except ImportError:
+    BOOSTING_AVAILABLE = False
+
+# AutoML
+try:
+    import optuna
+    from optuna.pruners import MedianPruner
+    from optuna.samplers import TPESampler
+    OPTUNA_AVAILABLE = True
+except ImportError:
+    OPTUNA_AVAILABLE = False
+
+# Explainability
+try:
+    import shap
+    SHAP_AVAILABLE = True
+except ImportError:
+    SHAP_AVAILABLE = False
+
+# ONNX
+try:
+    import onnx
+    import onnxruntime as ort
+    ONNX_AVAILABLE = True
+except ImportError:
+    ONNX_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# DATA STRUCTURES
+# ============================================================================
+
+@dataclass
+class GameSession:
+    """Enhanced gaming session with 90+ features"""
+    # Identifiers
+    session_id: str
+    game_name: str
+    game_exe: str
+    timestamp: float
+    duration_seconds: float
+    
+    # Hardware Features (15)
+    cpu_cores_physical: int
+    cpu_cores_logical: int
+    cpu_freq_base_mhz: float
+    cpu_freq_boost_mhz: float
+    cpu_cache_l2_mb: float
+    cpu_cache_l3_mb: float
+    cpu_tdp_watts: int
+    gpu_vram_gb: float
+    gpu_core_clock_mhz: float
+    gpu_memory_clock_mhz: float
+    gpu_cuda_cores: int
+    gpu_tensor_cores: int
+    gpu_ray_tracing_cores: int
+    ram_capacity_gb: float
+    ram_frequency_mhz: float
+    
+    # Configuration Features (20)
+    timer_resolution_ms: float
+    cpu_priority_class: int  # 0=NORMAL, 1=HIGH, 2=REALTIME
+    cpu_affinity_mask: int
+    gpu_clock_locked: bool
+    gpu_power_limit_pct: int
+    memory_optimization_level: int
+    page_file_size_gb: float
+    network_qos_enabled: bool
+    network_dscp_value: int
+    tcp_nagle_disabled: bool
+    tcp_buffer_kb: int
+    core_parking_disabled: bool
+    game_mode_enabled: bool
+    background_apps_limited: bool
+    services_stopped: bool
+    directx_version: int
+    vulkan_version: str
+    anti_cheat_type: str  # "none", "eac", "battleye", "vanguard"
+    launcher_type: str    # "steam", "epic", "gog"
+    online_mode: bool
+    
+    # Performance Metrics (30)
+    fps_avg: float
+    fps_min: float
+    fps_max: float
+    fps_std: float
+    fps_p1: float
+    fps_p5: float
+    fps_p25: float
+    fps_p50: float
+    fps_p75: float
+    fps_p95: float
+    fps_p99: float
+    frame_time_avg_ms: float
+    frame_time_p1_ms: float
+    frame_time_p99_ms: float
+    frame_time_p999_ms: float
+    frame_time_std_ms: float
+    stutter_count: int
+    stutter_duration_avg_ms: float
+    stutter_frequency_hz: float
+    cpu_usage_avg: float
+    cpu_usage_max: float
+    cpu_temp_c: float
+    cpu_throttled: bool
+    gpu_usage_avg: float
+    gpu_usage_max: float
+    gpu_temp_c: float
+    gpu_throttled: bool
+    gpu_power_w: float
+    memory_working_set_mb: float
+    memory_page_faults_per_sec: float
+    
+    # Network (3)
+    network_latency_ms: float
+    network_packet_loss_pct: float
+    network_bandwidth_mbps: float
+    
+    # Disk (3)
+    disk_read_mb_per_sec: float
+    disk_write_mb_per_sec: float
+    disk_latency_ms: float
+    
+    # Derived Features (será calculado)
+    features_derived: Dict[str, float] = field(default_factory=dict)
+    
+    # Target Variables
+    optimization_successful: bool = True
+    user_satisfaction_score: int = 5  # 1-5 scale
+
+
+class ModelType(Enum):
+    """Tipos de modelos disponibles"""
+    DEEP_NEURAL_NETWORK = "dnn"
+    XGBOOST = "xgb"
+    LIGHTGBM = "lgb"
+    CATBOOST = "cat"
+    ENSEMBLE = "ensemble"
+    RL_AGENT = "rl"
+
+
+# ============================================================================
+# FEATURE ENGINEERING
+# ============================================================================
+
+class AdvancedFeatureEngineer:
+    """
+    Extrae 90+ features de datos de sesiones de gaming
+    
+    Features:
+    - 15 Hardware
+    - 20 Configuration
+    - 30 Performance Metrics
+    - 25 Derived (temporal, statistical, frequency domain)
+    """
+    
+    def __init__(self):
+        self.scaler = RobustScaler()
+        self.feature_names: List[str] = []
+        
+    def extract_features(self, session: GameSession) -> np.ndarray:
+        """Extrae vector de features de una sesión"""
+        features = []
+        
+        # Hardware features (15)
+        features.extend([
+            session.cpu_cores_physical,
+            session.cpu_cores_logical,
+            session.cpu_freq_base_mhz,
+            session.cpu_freq_boost_mhz,
+            session.cpu_cache_l2_mb,
+            session.cpu_cache_l3_mb,
+            session.cpu_tdp_watts,
+            session.gpu_vram_gb,
+            session.gpu_core_clock_mhz,
+            session.gpu_memory_clock_mhz,
+            session.gpu_cuda_cores,
+            session.gpu_tensor_cores,
+            session.gpu_ray_tracing_cores,
+            session.ram_capacity_gb,
+            session.ram_frequency_mhz,
+        ])
+        
+        # Configuration features (20)
+        features.extend([
+            session.timer_resolution_ms,
+            session.cpu_priority_class,
+            session.cpu_affinity_mask,
+            float(session.gpu_clock_locked),
+            session.gpu_power_limit_pct,
+            session.memory_optimization_level,
+            session.page_file_size_gb,
+            float(session.network_qos_enabled),
+            session.network_dscp_value,
+            float(session.tcp_nagle_disabled),
+            session.tcp_buffer_kb,
+            float(session.core_parking_disabled),
+            float(session.game_mode_enabled),
+            float(session.background_apps_limited),
+            float(session.services_stopped),
+            session.directx_version,
+            self._encode_vulkan_version(session.vulkan_version),
+            self._encode_anti_cheat(session.anti_cheat_type),
+            self._encode_launcher(session.launcher_type),
+            float(session.online_mode),
+        ])
+        
+        # Performance metrics (30)
+        features.extend([
+            session.fps_avg,
+            session.fps_min,
+            session.fps_max,
+            session.fps_std,
+            session.fps_p1,
+            session.fps_p5,
+            session.fps_p25,
+            session.fps_p50,
+            session.fps_p75,
+            session.fps_p95,
+            session.fps_p99,
+            session.frame_time_avg_ms,
+            session.frame_time_p1_ms,
+            session.frame_time_p99_ms,
+            session.frame_time_p999_ms,
+            session.frame_time_std_ms,
+            session.stutter_count,
+            session.stutter_duration_avg_ms,
+            session.stutter_frequency_hz,
+            session.cpu_usage_avg,
+            session.cpu_usage_max,
+            session.cpu_temp_c,
+            float(session.cpu_throttled),
+            session.gpu_usage_avg,
+            session.gpu_usage_max,
+            session.gpu_temp_c,
+            float(session.gpu_throttled),
+            session.gpu_power_w,
+            session.memory_working_set_mb,
+            session.memory_page_faults_per_sec,
+        ])
+        
+        # Network + Disk (6)
+        features.extend([
+            session.network_latency_ms,
+            session.network_packet_loss_pct,
+            session.network_bandwidth_mbps,
+            session.disk_read_mb_per_sec,
+            session.disk_write_mb_per_sec,
+            session.disk_latency_ms,
+        ])
+        
+        # Derived features (25)
+        derived = self._compute_derived_features(session)
+        features.extend(derived)
+        
+        return np.array(features, dtype=np.float32)
+    
+    def _compute_derived_features(self, session: GameSession) -> List[float]:
+        """Calcula features derivadas avanzadas"""
+        derived = []
+        
+        # Variabilidad
+        cv_fps = session.fps_std / session.fps_avg if session.fps_avg > 0 else 0
+        derived.append(cv_fps)
+        
+        # Stability Index
+        stability_index = (1 - cv_fps) * 100
+        derived.append(stability_index)
+        
+        # Performance Score (weighted)
+        perf_score = (
+            session.fps_avg * 0.4 +
+            session.fps_p1 * 0.3 +
+            stability_index * 0.2 +
+            (100 - session.stutter_count) * 0.1
+        )
+        derived.append(perf_score)
+        
+        # Efficiency Metrics
+        fps_per_watt = session.fps_avg / session.gpu_power_w if session.gpu_power_w > 0 else 0
+        derived.append(fps_per_watt)
+        
+        fps_per_degree = session.fps_avg / session.gpu_temp_c if session.gpu_temp_c > 0 else 0
+        derived.append(fps_per_degree)
+        
+        frames_per_mb_vram = session.fps_avg / session.gpu_vram_gb if session.gpu_vram_gb > 0 else 0
+        derived.append(frames_per_mb_vram)
+        
+        # Frame Time Analysis
+        frame_time_jitter = session.frame_time_p99_ms - session.frame_time_avg_ms
+        derived.append(frame_time_jitter)
+        
+        # GPU Utilization Efficiency
+        gpu_efficiency = session.fps_avg / session.gpu_usage_avg if session.gpu_usage_avg > 0 else 0
+        derived.append(gpu_efficiency)
+        
+        # CPU-GPU Balance
+        cpu_gpu_ratio = session.cpu_usage_avg / session.gpu_usage_avg if session.gpu_usage_avg > 0 else 1.0
+        derived.append(cpu_gpu_ratio)
+        
+        # Memory Pressure
+        memory_pressure = session.memory_working_set_mb / (session.ram_capacity_gb * 1024) if session.ram_capacity_gb > 0 else 0
+        derived.append(memory_pressure)
+        
+        # Thermal Efficiency
+        thermal_headroom_cpu = 95 - session.cpu_temp_c  # Assuming 95°C safe limit
+        thermal_headroom_gpu = 85 - session.gpu_temp_c  # Assuming 85°C safe limit
+        derived.extend([thermal_headroom_cpu, thermal_headroom_gpu])
+        
+        # Network Quality Score
+        network_quality = (
+            (1 - session.network_packet_loss_pct / 100) * 50 +
+            (1 - min(session.network_latency_ms / 100, 1.0)) * 50
+        )
+        derived.append(network_quality)
+        
+        # Disk Performance
+        disk_throughput = session.disk_read_mb_per_sec + session.disk_write_mb_per_sec
+        derived.append(disk_throughput)
+        
+        # Stutter Impact
+        stutter_impact = session.stutter_count * session.stutter_duration_avg_ms / session.duration_seconds if session.duration_seconds > 0 else 0
+        derived.append(stutter_impact)
+        
+        # Frame Pacing Quality
+        frame_pacing_quality = 100 - min(session.frame_time_std_ms * 10, 100)
+        derived.append(frame_pacing_quality)
+        
+        # Bottleneck Detection
+        cpu_bottleneck = 1.0 if session.cpu_usage_avg > 90 and session.gpu_usage_avg < 80 else 0.0
+        gpu_bottleneck = 1.0 if session.gpu_usage_avg > 95 and session.cpu_usage_avg < 80 else 0.0
+        derived.extend([cpu_bottleneck, gpu_bottleneck])
+        
+        # Optimization Effectiveness (si disponible)
+        if hasattr(session, 'baseline_fps'):
+            fps_improvement = ((session.fps_avg - session.baseline_fps) / session.baseline_fps) * 100
+            derived.append(fps_improvement)
+        else:
+            derived.append(0.0)
+        
+        # Pad to 25 features if needed
+        while len(derived) < 25:
+            derived.append(0.0)
+        
+        return derived[:25]
+    
+    def _encode_anti_cheat(self, ac_type: str) -> float:
+        """Encode anti-cheat type"""
+        mapping = {"none": 0, "vac": 1, "eac": 2, "battleye": 3, "vanguard": 4, "faceit": 5}
+        return float(mapping.get(ac_type.lower(), 0))
+    
+    def _encode_launcher(self, launcher: str) -> float:
+        """Encode launcher type"""
+        mapping = {"none": 0, "steam": 1, "epic": 2, "gog": 3, "origin": 4, "ubisoft": 5}
+        return float(mapping.get(launcher.lower(), 0))
+    
+    def _encode_vulkan_version(self, version: str) -> float:
+        """Encode Vulkan version (e.g., '1.3' -> 1.3)"""
+        try:
+            return float(version)
+        except (ValueError, TypeError):
+            return 0.0
+    
+    def fit_scaler(self, features: np.ndarray):
+        """Fit scaler on training data"""
+        self.scaler.fit(features)
+    
+    def transform(self, features: np.ndarray) -> np.ndarray:
+        """Scale features"""
+        return self.scaler.transform(features)
+    
+    def get_feature_names(self) -> List[str]:
+        """Retorna nombres de todas las features"""
+        # TODO: Implementar lista completa de nombres
+        return [f"feature_{i}" for i in range(91)]  # Placeholder
+
+
+# ============================================================================
+# DEEP LEARNING MODEL (PyTorch)
+# ============================================================================
+
+class ResidualBlock(nn.Module):
+    """Bloque residual con skip connection"""
+    def __init__(self, in_features: int, out_features: int, dropout: float = 0.2):
+        super().__init__()
+        self.linear1 = nn.Linear(in_features, out_features)
+        self.bn1 = nn.BatchNorm1d(out_features)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(out_features, out_features)
+        self.bn2 = nn.BatchNorm1d(out_features)
+        
+        # Skip connection
+        self.skip = nn.Linear(in_features, out_features) if in_features != out_features else nn.Identity()
+    
+    def forward(self, x):
+        identity = self.skip(x)
+        
+        out = self.linear1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        out = self.dropout(out)
+        
+        out = self.linear2(out)
+        out = self.bn2(out)
+        
+        out += identity
+        out = self.relu(out)
+        
+        return out
+
+
+class DeepPerformancePredictor(nn.Module):
+    """
+    Red neuronal profunda multi-tarea
+    
+    Outputs:
+    - fps_prediction (regression)
+    - stability_score (regression 0-100)
+    - optimization_success (classification 0-1)
+    """
+    
+    def __init__(self, input_size: int = 91):
+        super().__init__()
+        
+        # Input processing
+        self.input_bn = nn.BatchNorm1d(input_size)
+        
+        # Encoder
+        self.encoder = nn.Sequential(
+            nn.Linear(input_size, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            
+            ResidualBlock(256, 256, dropout=0.3),
+            ResidualBlock(256, 256, dropout=0.3),
+            
+            ResidualBlock(256, 128, dropout=0.2),
+            ResidualBlock(128, 128, dropout=0.2),
+            
+            ResidualBlock(128, 64, dropout=0.2),
+        )
+        
+        # Task-specific heads
+        self.fps_head = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(32, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1)
+        )
+        
+        self.stability_head = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(32, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1),
+            nn.Sigmoid()  # Output 0-1, scale to 0-100
+        )
+        
+        self.success_head = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(32, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x):
+        x = self.input_bn(x)
+        encoded = self.encoder(x)
+        
+        fps = self.fps_head(encoded)
+        stability = self.stability_head(encoded) * 100  # Scale to 0-100
+        success = self.success_head(encoded)
+        
+        return fps, stability, success
+
+
+# ============================================================================
+# TRAINING PIPELINE
+# ============================================================================
+
+class MLPipeline:
+    """
+    Pipeline completo de Machine Learning
+    
+    Features:
+    - Multiple model types
+    - Cross-validation
+    - Hyperparameter tuning
+    - Model ensembling
+    - ONNX export
+    """
+    
+    def __init__(self, model_dir: Path = None):
+        self.model_dir = model_dir or Path.home() / '.game_optimizer' / 'ml_models_v5'
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.feature_engineer = AdvancedFeatureEngineer()
+        self.models: Dict[str, Any] = {}
+        self.training_history: List[Dict] = []
+        
+        logger.info("✓ ML Pipeline V5.0 initialized")
+        logger.info(f"  Model directory: {self.model_dir}")
+        logger.info(f"  PyTorch: {PYTORCH_AVAILABLE}")
+        logger.info(f"  Gradient Boosting: {BOOSTING_AVAILABLE}")
+        logger.info(f"  AutoML: {OPTUNA_AVAILABLE}")
+        logger.info(f"  Explainability: {SHAP_AVAILABLE}")
+        logger.info(f"  ONNX: {ONNX_AVAILABLE}")
+    
+    def prepare_dataset(self, sessions: List[GameSession]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Prepara dataset para entrenamiento
+        
+        Returns:
+            X: Features (N, 91)
+            y_fps: FPS targets (N,)
+            y_stability: Stability targets (N,)
+            y_success: Success labels (N,)
+        """
+        logger.info(f"Preparing dataset from {len(sessions)} sessions...")
+        
+        X = []
+        y_fps = []
+        y_stability = []
+        y_success = []
+        
+        for session in sessions:
+            features = self.feature_engineer.extract_features(session)
+            X.append(features)
+            y_fps.append(session.fps_avg)
+            
+            # Calculate stability score
+            stability = (1 - session.fps_std / session.fps_avg) * 100 if session.fps_avg > 0 else 0
+            y_stability.append(stability)
+            
+            y_success.append(float(session.optimization_successful))
+        
+        X = np.array(X, dtype=np.float32)
+        y_fps = np.array(y_fps, dtype=np.float32)
+        y_stability = np.array(y_stability, dtype=np.float32)
+        y_success = np.array(y_success, dtype=np.float32)
+        
+        logger.info(f"✓ Dataset prepared: X.shape={X.shape}")
+        
+        return X, y_fps, y_stability, y_success
+    
+    def train_deep_learning_model(
+        self,
+        X_train: np.ndarray,
+        y_fps_train: np.ndarray,
+        y_stability_train: np.ndarray,
+        y_success_train: np.ndarray,
+        X_val: np.ndarray,
+        y_fps_val: np.ndarray,
+        y_stability_val: np.ndarray,
+        y_success_val: np.ndarray,
+        epochs: int = 100,
+        batch_size: int = 64,
+        learning_rate: float = 0.001
+    ) -> Dict[str, Any]:
+        """Train Deep Neural Network"""
+        
+        if not PYTORCH_AVAILABLE:
+            logger.error("PyTorch not available")
+            return {}
+        
+        logger.info("Training Deep Neural Network...")
+        
+        # TODO: Implementar training loop completo
+        # - DataLoader
+        # - Mixed precision training
+        # - Learning rate scheduling
+        # - Early stopping
+        # - Model checkpointing
+        
+        model = DeepPerformancePredictor(input_size=X_train.shape[1])
+        
+        logger.info("✓ Deep Learning model training complete (PLACEHOLDER)")
+        
+        return {"model": model, "metrics": {}}
+    
+    def train_all_models(self, sessions: List[GameSession]) -> Dict[str, Any]:
+        """
+        Entrena todos los modelos y retorna el mejor
+        
+        Returns:
+            Dictionary con modelos entrenados y métricas
+        """
+        logger.info("=" * 80)
+        logger.info("STARTING FULL ML PIPELINE TRAINING")
+        logger.info("=" * 80)
+        
+        # Prepare data
+        X, y_fps, y_stability, y_success = self.prepare_dataset(sessions)
+        
+        # Split data
+        X_train, X_val, y_fps_train, y_fps_val = train_test_split(X, y_fps, test_size=0.2, random_state=42)
+        _, _, y_stab_train, y_stab_val = train_test_split(X, y_stability, test_size=0.2, random_state=42)
+        _, _, y_succ_train, y_succ_val = train_test_split(X, y_success, test_size=0.2, random_state=42)
+        
+        # Fit scaler
+        self.feature_engineer.fit_scaler(X_train)
+        X_train_scaled = self.feature_engineer.transform(X_train)
+        X_val_scaled = self.feature_engineer.transform(X_val)
+        
+        results = {}
+        
+        # Train Deep Learning
+        if PYTORCH_AVAILABLE:
+            dnn_result = self.train_deep_learning_model(
+                X_train_scaled, y_fps_train, y_stab_train, y_succ_train,
+                X_val_scaled, y_fps_val, y_stab_val, y_succ_val
+            )
+            results['dnn'] = dnn_result
+        
+        # Train Gradient Boosting
+        # TODO: XGBoost, LightGBM, CatBoost
+        
+        # Train RL Agent
+        # TODO: PPO agent
+        
+        # Create Ensemble
+        # TODO: Weighted voting
+        
+        logger.info("=" * 80)
+        logger.info("TRAINING COMPLETE")
+        logger.info("=" * 80)
+        
+        return results
+
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+def main():
+    """Example usage"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    pipeline = MLPipeline()
+    
+    # Create dummy data
+    dummy_sessions = []
+    for i in range(100):
+        session = GameSession(
+            session_id=f"session_{i}",
+            game_name="Test Game",
+            game_exe="game.exe",
+            timestamp=time.time(),
+            duration_seconds=300,
+            
+            # Hardware (dummy values)
+            cpu_cores_physical=8, cpu_cores_logical=16,
+            cpu_freq_base_mhz=3600, cpu_freq_boost_mhz=4800,
+            cpu_cache_l2_mb=8, cpu_cache_l3_mb=32, cpu_tdp_watts=65,
+            gpu_vram_gb=8, gpu_core_clock_mhz=1800, gpu_memory_clock_mhz=7000,
+            gpu_cuda_cores=3584, gpu_tensor_cores=112, gpu_ray_tracing_cores=28,
+            ram_capacity_gb=16, ram_frequency_mhz=3200,
+            
+            # Config
+            timer_resolution_ms=0.5, cpu_priority_class=1, cpu_affinity_mask=255,
+            gpu_clock_locked=True, gpu_power_limit_pct=100,
+            memory_optimization_level=2, page_file_size_gb=16,
+            network_qos_enabled=True, network_dscp_value=46,
+            tcp_nagle_disabled=True, tcp_buffer_kb=256,
+            core_parking_disabled=True, game_mode_enabled=True,
+            background_apps_limited=True, services_stopped=True,
+            directx_version=12, vulkan_version="1.3",
+            anti_cheat_type="none", launcher_type="steam", online_mode=False,
+            
+            # Performance
+            fps_avg=120 + i, fps_min=90, fps_max=144,
+            fps_std=5, fps_p1=95, fps_p5=100, fps_p25=110,
+            fps_p50=120, fps_p75=125, fps_p95=135, fps_p99=140,
+            frame_time_avg_ms=8.3, frame_time_p1_ms=6.9,
+            frame_time_p99_ms=10.5, frame_time_p999_ms=12.0,
+            frame_time_std_ms=1.5,
+            stutter_count=5, stutter_duration_avg_ms=20, stutter_frequency_hz=0.1,
+            cpu_usage_avg=60, cpu_usage_max=80, cpu_temp_c=65, cpu_throttled=False,
+            gpu_usage_avg=95, gpu_usage_max=98, gpu_temp_c=75, gpu_throttled=False,
+            gpu_power_w=200,
+            memory_working_set_mb=8000, memory_page_faults_per_sec=100,
+            
+            # Network/Disk
+            network_latency_ms=20, network_packet_loss_pct=0.1, network_bandwidth_mbps=100,
+            disk_read_mb_per_sec=50, disk_write_mb_per_sec=20, disk_latency_ms=5
+        )
+        dummy_sessions.append(session)
+    
+    # Train
+    results = pipeline.train_all_models(dummy_sessions)
+    
+    logger.info("Training complete!")
+
+
+if __name__ == "__main__":
+    main()
