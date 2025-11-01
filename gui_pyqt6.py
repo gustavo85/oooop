@@ -28,6 +28,15 @@ try:
 except ImportError:
     PYQT6_AVAILABLE = False
     logger.warning("PyQt6 not available. Install with: pip install PyQt6 PyQt6-Charts")
+    
+    # Define placeholder classes to prevent errors when module is imported without PyQt6
+    class QThread:
+        pass
+    class QWidget:
+        pass
+    class QMainWindow:
+        pass
+    pyqtSignal = lambda *args: None
 
 try:
     import psutil
@@ -65,34 +74,46 @@ class DarkTheme:
     DIVIDER = "#484848"
 
 
-class MonitoringThread(QThread):
-    """Background thread for system monitoring"""
-    
-    data_updated = pyqtSignal(dict)
-    
-    def __init__(self):
-        super().__init__()
-        self.running = True
+if PYQT6_AVAILABLE:
+    class MonitoringThread(QThread):
+        """Background thread for system monitoring"""
         
-    def run(self):
-        """Main monitoring loop"""
-        while self.running:
-            if PSUTIL_AVAILABLE:
-                try:
-                    data = {
-                        'cpu_percent': psutil.cpu_percent(interval=0.5),
-                        'memory_percent': psutil.virtual_memory().percent,
-                        'disk_io': psutil.disk_io_counters(),
-                        'network_io': psutil.net_io_counters(),
-                    }
-                    self.data_updated.emit(data)
-                except Exception as e:
-                    logger.debug(f"Monitoring error: {e}")
-            time.sleep(1)
-    
-    def stop(self):
-        """Stop monitoring"""
-        self.running = False
+        data_updated = pyqtSignal(dict)
+        
+        def __init__(self):
+            super().__init__()
+            self.running = True
+            
+        def run(self):
+            """Main monitoring loop"""
+            while self.running:
+                if PSUTIL_AVAILABLE:
+                    try:
+                        data = {
+                            'cpu_percent': psutil.cpu_percent(interval=0.5),
+                            'memory_percent': psutil.virtual_memory().percent,
+                            'disk_io': psutil.disk_io_counters(),
+                            'network_io': psutil.net_io_counters(),
+                        }
+                        self.data_updated.emit(data)
+                    except Exception as e:
+                        logger.debug(f"Monitoring error: {e}")
+                time.sleep(1)
+        
+        def stop(self):
+            """Stop monitoring"""
+            self.running = False
+else:
+    class MonitoringThread:
+        """Placeholder when PyQt6 not available"""
+        def __init__(self):
+            pass
+        def start(self):
+            pass
+        def stop(self):
+            pass
+        def wait(self):
+            pass
 
 
 class DashboardWidget(QWidget):

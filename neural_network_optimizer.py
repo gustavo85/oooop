@@ -15,9 +15,11 @@ logger = logging.getLogger(__name__)
 
 try:
     import numpy as np
+    from numpy import ndarray
     NUMPY_AVAILABLE = True
 except ImportError:
     NUMPY_AVAILABLE = False
+    ndarray = None  # Fallback for type hints
     logger.warning("numpy not available")
 
 try:
@@ -132,6 +134,7 @@ class NeuralNetworkOptimizer:
         """Load historical training data"""
         try:
             if self.training_data_file.exists():
+                # Pickle is used here for model persistence - only load trusted data
                 with open(self.training_data_file, 'rb') as f:
                     self.training_data = pickle.load(f)
                 logger.info(f"Loaded {len(self.training_data)} training sessions")
@@ -152,7 +155,7 @@ class NeuralNetworkOptimizer:
         self._save_training_data()
         logger.debug(f"Added session: {session.game_name}, FPS={session.avg_fps:.1f}")
     
-    def prepare_features(self, sessions: List[GameSession]) -> np.ndarray:
+    def prepare_features(self, sessions: List[GameSession]):
         """Prepare feature matrix from sessions"""
         if not NUMPY_AVAILABLE:
             raise RuntimeError("numpy is required for feature preparation")

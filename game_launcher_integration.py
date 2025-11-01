@@ -223,7 +223,8 @@ class SteamIntegration:
         """Launch a Steam game"""
         try:
             steam_url = f"steam://rungameid/{app_id}"
-            subprocess.Popen(['cmd', '/c', 'start', steam_url], shell=True)
+            # Use shell=False for security - pass as list
+            subprocess.Popen(['cmd', '/c', 'start', '', steam_url])
             logger.info(f"Launching Steam game: {app_id}")
             return True
         except Exception as e:
@@ -307,7 +308,8 @@ class EpicGamesIntegration:
         """Launch an Epic Games Store game"""
         try:
             epic_url = f"com.epicgames.launcher://apps/{app_id}?action=launch&silent=true"
-            subprocess.Popen(['cmd', '/c', 'start', epic_url], shell=True)
+            # Use shell=False for security
+            subprocess.Popen(['cmd', '/c', 'start', '', epic_url])
             logger.info(f"Launching Epic game: {app_id}")
             return True
         except Exception as e:
