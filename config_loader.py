@@ -72,19 +72,30 @@ class GameProfile:
 class ConfigurationManager:
     CONFIG_VERSION = "3.5"
     
-    def __init__(self, config_file: Optional[str] = None):
+    def __init__(self, config_file: Optional[str] = None, validate: bool = True):
         self.config_dir = Path.home() / '.game_optimizer'
         self.config_dir.mkdir(parents=True, exist_ok=True)
         
         self.config_file = Path(config_file) if config_file else self.config_dir / 'config.json'
         self.global_config: Dict[str, Any] = {}
         self.game_profiles: Dict[str, GameProfile] = {}
+        self.validate_on_load = validate
         
         self._load_configuration()
     
     def _load_configuration(self):
         try:
             if self.config_file.exists():
+                # Validate config file structure if validation enabled
+                if self.validate_on_load:
+                    try:
+                        from config_validator import ConfigValidator
+                        is_valid, errors = ConfigValidator.validate_config_file(self.config_file)
+                        if not is_valid:
+                            logger.warning(f"Configuration file has validation errors: {errors}")
+                    except ImportError:
+                        logger.debug("config_validator not available, skipping file validation")
+                
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 
@@ -94,6 +105,17 @@ class ConfigurationManager:
                     self._save_migrated_data(data)
                 
                 self.global_config = data.get('global', {})
+                
+                # Validate global config if enabled
+                if self.validate_on_load:
+                    try:
+                        from config_validator import ConfigValidator
+                        is_valid, errors = ConfigValidator.validate_global_config(self.global_config)
+                        if not is_valid:
+                            logger.warning(f"Global config validation errors: {errors}")
+                    except ImportError:
+                        pass
+                
                 profiles_data = data.get('game_profiles', {})
                 
                 for game_exe, profile_data in profiles_data.items():
@@ -103,6 +125,18 @@ class ConfigurationManager:
                             profile_data['qos_rules'] = [QoSRule(**rule) for rule in profile_data['qos_rules']]
                         
                         profile = GameProfile(**profile_data)
+                        
+                        # Validate and sanitize profile if enabled
+                        if self.validate_on_load:
+                            try:
+                                from config_validator import ConfigValidator
+                                profile = ConfigValidator.sanitize_profile(profile)
+                                is_valid, errors = ConfigValidator.validate_profile(profile)
+                                if not is_valid:
+                                    logger.warning(f"Profile '{profile.name}' validation errors: {errors}")
+                            except ImportError:
+                                pass
+                        
                         self.game_profiles[game_exe.lower()] = profile
                         
                     except Exception as e:
@@ -237,10 +271,23 @@ class ConfigurationManager:
     
     def create_game_profile(self, profile: GameProfile) -> bool:
         try:
+            # Validate profile before saving
+            if self.validate_on_load:
+                try:
+                    from config_validator import ConfigValidator
+                    profile = ConfigValidator.sanitize_profile(profile)
+                    is_valid, errors = ConfigValidator.validate_profile(profile)
+                    if not is_valid:
+                        logger.error(f"Profile validation failed: {errors}")
+                        return False
+                except ImportError:
+                    logger.debug("config_validator not available, skipping validation")
+            
             self.game_profiles[profile.game_exe.lower()] = profile
             self.save_configuration()
             return True
-        except Exception:
+        except Exception as e:
+            logger.error(f"Failed to create profile: {e}")
             return False
     
     def delete_game_profile(self, game_exe: str) -> bool:
