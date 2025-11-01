@@ -474,16 +474,17 @@ class ADLWrapper:
     
     @staticmethod
     def _adl_alloc(size):
-        """Memory allocation callback for ADL"""
-        return ctypes.cast(
-            ctypes.pythonapi.PyMem_Malloc(size),
-            ctypes.c_void_p
-        ).value
+        """Memory allocation callback for ADL - uses ctypes memory management"""
+        # Allocate memory using ctypes (managed by Python)
+        buffer = (ctypes.c_byte * size)()
+        return ctypes.addressof(buffer)
 
     @staticmethod
     def _adl_free(ptr):
-        """Memory deallocation callback for ADL"""
-        ctypes.pythonapi.PyMem_Free(ctypes.c_void_p(ptr))
+        """Memory deallocation callback for ADL - handled by Python GC"""
+        # Memory will be freed by Python's garbage collector
+        # No explicit free needed for ctypes-managed memory
+        pass
     
     def _load_adl(self) -> bool:
         """Load atiadlxx.dll and bind functions"""
@@ -651,7 +652,7 @@ class ADLWrapper:
             return False
     
     def _lock_clocks_overdrive8(self) -> bool:
-        """Lock clocks using Overdrive8 API (RX 5000+ series)"""
+        """Lock clocks using Overdrive8 API (RX 5000+ series) - Partial implementation"""
         try:
             # Get initial OD8 settings
             init_setting = ADLOD8InitSetting()
@@ -662,7 +663,7 @@ class ADLWrapper:
             )
             
             if status != ADL_OK:
-                logger.debug(f"Overdrive8 not supported: {status}")
+                logger.debug(f"Overdrive8 not supported on this GPU: {status}")
                 return False
             
             # Get current settings to save as backup
@@ -680,18 +681,17 @@ class ADLWrapper:
                     performance_level=0  # Will store OD8 settings
                 )
             
-            # Set maximum performance (simplified - would need to parse OD8 features)
-            # OD8 features include: GPU clock, memory clock, voltage, power limit, etc.
-            # For now, we'll just log that it's available
-            logger.info("✓ Overdrive8 detected - advanced clock control available")
-            logger.warning("⚠️ Full OD8 implementation requires feature-specific tuning")
-            
-            # In production, would:
-            # 1. Parse init_setting.featureID to find clock control features
+            # Overdrive8 feature parsing and clock setting requires:
+            # 1. Parse init_setting.featureID to find GPU/Memory clock features
             # 2. Set Od8SettingTable with maximum values for those features
             # 3. Call ADL2_Overdrive8_Setting_Set with the new settings
             
-            return False  # Not fully implemented yet
+            logger.info("⚠️  Overdrive8 detected but full implementation requires feature-specific tuning")
+            logger.debug(f"OD8 capabilities: {init_setting.overdrive8Capabilities}, features: {init_setting.count}")
+            
+            # Return False to indicate not fully implemented yet
+            # This will cause fallback to OverdriveN
+            return False
             
         except Exception as e:
             logger.debug(f"Overdrive8 error: {e}")

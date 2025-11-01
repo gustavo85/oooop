@@ -57,7 +57,12 @@ class MemoryMappedTelemetry:
             self.file_handle = open(self.mmap_path, 'r+b' if self.mmap_path.exists() else 'w+b')
             
             # Resize file if needed
-            if self.mmap_path.stat().st_size < self.size:
+            try:
+                current_size = self.mmap_path.stat().st_size if self.mmap_path.exists() else 0
+                if current_size < self.size:
+                    self.file_handle.truncate(self.size)
+            except (OSError, IOError) as e:
+                logger.debug(f"File resize warning: {e}")
                 self.file_handle.truncate(self.size)
             
             # Create memory map
@@ -253,7 +258,8 @@ class PerformanceMonitor:
     
     def __init__(self):
         self.active_sessions: Dict[int, Dict[str, Any]] = {}
-        self.lock = threading.RLock()  # Changed to RLock for reentrant locking
+        # Using RLock for reentrant locking to prevent deadlocks in nested function calls
+        self.lock = threading.RLock()
         self.monitor_threads: Dict[int, threading.Thread] = {}
         
         # Lock-free queue for telemetry events

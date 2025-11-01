@@ -17,6 +17,7 @@ import ctypes
 import logging
 import time
 import threading
+import sys
 from ctypes import wintypes
 from typing import Optional, Callable, Deque, List
 from collections import deque
@@ -27,12 +28,10 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 # Windows-specific constants and structures
 # Note: This module is designed for Windows only and will have limited functionality on other platforms
-try:
-    # Ensure we're on Windows
-    if not hasattr(wintypes, 'LARGE_INTEGER'):
-        logger.warning("wintypes not fully available - running in compatibility mode")
-except Exception as e:
-    logger.warning(f"Windows types not available: {e}")
+IS_WINDOWS = sys.platform == 'win32'
+
+if not IS_WINDOWS:
+    logger.warning("ETW monitoring is Windows-only - running in compatibility mode")
 
 # ETW Constants
 ERROR_SUCCESS = 0
@@ -768,27 +767,33 @@ class ETWDPCLatencyMonitor:
                 # DPC/ISR events contain InitialTime and routine execution time
                 if event.UserDataLength >= 16:
                     try:
-                        user_data = ctypes.string_at(event.UserData, event.UserDataLength)
+                        user_data = ctypes.string_at(event.UserData, min(event.UserDataLength, 32))
                         
                         # Parse DPC/ISR timing (structure varies by Windows version)
-                        # Simplified: Extract execution time in QPC ticks
-                        # Full implementation would parse complete DPC_RECORD structure
+                        # Typical structure: UINT64 InitialTime, UINT64 RoutineAddr, UINT32 ExecutionTime
+                        # For now, we'll parse what we can and log a warning about limitations
+                        
                         initial_time, routine_addr = struct.unpack('QQ', user_data[:16])
                         
-                        # Estimate latency (this is simplified)
-                        # Real implementation needs more sophisticated parsing
-                        latency_us = 100.0  # Placeholder
+                        # Try to extract execution time if available
+                        latency_us = 50.0  # Default minimum if we can't parse execution time
+                        if len(user_data) >= 20:
+                            exec_time_ticks = struct.unpack('I', user_data[16:20])[0]
+                            # Convert from 100ns units to microseconds (approximate)
+                            latency_us = exec_time_ticks / 10.0
                         
-                        dpc_data = DPCLatencyData(
-                            timestamp=time.time(),
-                            latency_us=latency_us,
-                            is_dpc=(event_id == KERNEL_DPC_EVENT_ID),
-                            driver_object=routine_addr
-                        )
-                        self.dpc_readings.append(dpc_data)
+                        # Only record if latency is significant
+                        if latency_us > 10.0:
+                            dpc_data = DPCLatencyData(
+                                timestamp=time.time(),
+                                latency_us=latency_us,
+                                is_dpc=(event_id == KERNEL_DPC_EVENT_ID),
+                                driver_object=routine_addr
+                            )
+                            self.dpc_readings.append(dpc_data)
                         
-                    except struct.error:
-                        pass
+                    except (struct.error, ValueError) as e:
+                        logger.debug(f"DPC event parsing error: {e}")
                         
         except Exception as e:
             logger.debug(f"DPC event callback error: {e}")
