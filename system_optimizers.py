@@ -171,21 +171,42 @@ class MemoryOptimizer:
         except Exception:
             self.NtSetSystemInformation = None
     
-    def purge_standby_memory_adaptive(self, min_interval: int = 30, threshold_percent: float = 70) -> bool:
-        """Adaptive purge with configurable interval and threshold"""
+    def purge_standby_memory_adaptive(self, min_interval: int = 30, threshold_percent: float = 70, threshold_mb: Optional[int] = None) -> bool:
+        """
+        Adaptive purge with configurable interval and threshold.
+        
+        Args:
+            min_interval: Minimum seconds between purges
+            threshold_percent: Purge if memory usage exceeds this percentage
+            threshold_mb: Optional - purge only if free memory is below this threshold in MB
+        
+        Returns:
+            bool: True if purge was performed, False otherwise
+        """
         try:
             if time.time() - self.last_optimization < min_interval:
                 return False
             stats = self.get_memory_stats()
-            if stats and not (stats.used_percent > threshold_percent or stats.available_gb < 1.0):
+            if not stats:
                 return False
+            
+            # Check if we should purge based on threshold_mb
+            if threshold_mb is not None:
+                free_mb = stats.available_gb * 1024
+                if free_mb >= threshold_mb:
+                    return False  # Don't purge if we have enough free memory
+            
+            # Also check percentage threshold or absolute low memory
+            if not (stats.used_percent > threshold_percent or stats.available_gb < 1.0):
+                return False
+            
             if not self.NtSetSystemInformation:
                 return False
             command = SYSTEM_MEMORY_LIST_COMMAND(Command=MemoryPurgeStandbyList)
             status = self.NtSetSystemInformation(0x50, ctypes.byref(command), ctypes.sizeof(command))
             if status == 0:
                 self.last_optimization = time.time()
-                logger.info(f"✓ Standby memory purged ({stats.used_percent:.1f}% usage)")
+                logger.info(f"✓ Standby memory purged ({stats.used_percent:.1f}% usage, {stats.available_gb:.2f}GB free)")
                 return True
             return False
         except Exception as e:

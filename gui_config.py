@@ -126,6 +126,8 @@ class GameOptimizerGUI:
         optimizations = [
             ('optimize_working_set', 'Working Set Tuning'),
             ('network_qos_enabled', 'Network QoS'),
+            ('disable_nagle', 'Disable Nagle Algorithm (Low Latency)'),
+            ('tcp_buffer_tuning', 'TCP Buffer Tuning'),
             ('gpu_scheduling_enabled', 'GPU Hardware Scheduling'),
             ('gpu_clock_locking', 'GPU Clock Locking'),
             ('power_high_performance', 'High Performance Power Plan'),
@@ -230,7 +232,7 @@ class GameOptimizerGUI:
         ttk.Button(frame, text="Save Global Settings", command=self._save_global_settings).pack(pady=20)
     
     def _setup_monitoring_tab(self):
-        """Setup real-time monitoring tab"""
+        """Setup real-time monitoring tab with frame time P99 graph"""
         
         frame = ttk.Frame(self.monitoring_tab, padding=10)
         frame.pack(fill=tk.BOTH, expand=True)
@@ -238,21 +240,21 @@ class GameOptimizerGUI:
         ttk.Label(frame, text="Real-Time Performance Monitoring", font=('Arial', 12, 'bold')).pack(pady=10)
         
         if MATPLOTLIB_AVAILABLE:
-            # Create matplotlib figure
-            self.fig = Figure(figsize=(8, 6), dpi=100)
-            self.ax1 = self.fig.add_subplot(211)
-            self.ax2 = self.fig.add_subplot(212)
+            # Create matplotlib figure for frame time history
+            self.fig = Figure(figsize=(10, 6), dpi=100)
+            self.ax_frametime = self.fig.add_subplot(111)
             
-            self.ax1.set_title("FPS")
-            self.ax1.set_ylabel("Frames per Second")
-            
-            self.ax2.set_title("Frame Time")
-            self.ax2.set_ylabel("Milliseconds")
-            self.ax2.set_xlabel("Time")
+            self.ax_frametime.set_title("Frame Time P99 (Last 60 readings)", fontsize=12, fontweight='bold')
+            self.ax_frametime.set_ylabel("Frame Time (ms)", fontsize=10)
+            self.ax_frametime.set_xlabel("Reading #", fontsize=10)
+            self.ax_frametime.grid(True, alpha=0.3)
             
             self.canvas = FigureCanvasTkAgg(self.fig, master=frame)
             self.canvas.draw()
             self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            
+            # Initialize data storage for frame time history
+            self.frame_time_history = []
             
             # Start update loop
             self._update_monitoring_graphs()
@@ -308,8 +310,8 @@ class GameOptimizerGUI:
         self.profile_vars['game_exe'].set(profile.game_exe)
         
         # Booleans
-        for key in ['optimize_working_set', 'network_qos_enabled', 'gpu_scheduling_enabled', 
-                    'gpu_clock_locking', 'power_high_performance', 'cpu_affinity_enabled',
+        for key in ['optimize_working_set', 'network_qos_enabled', 'disable_nagle', 'tcp_buffer_tuning',
+                    'gpu_scheduling_enabled', 'gpu_clock_locking', 'power_high_performance', 'cpu_affinity_enabled',
                     'disable_core_parking', 'directx_optimizations', 'stop_services', 
                     'stop_processes', 'enable_frame_time_analysis', 'enable_telemetry', 'ml_auto_tune_enabled']:
             if key in self.profile_vars:
@@ -428,19 +430,73 @@ class GameOptimizerGUI:
             messagebox.showerror("Error", f"Failed to save settings: {e}")
     
     def _update_monitoring_graphs(self):
-        """Update real-time monitoring graphs"""
+        """Update real-time monitoring graphs with frame time P99 data"""
         if not MATPLOTLIB_AVAILABLE or not self.optimizer:
             return
         
         try:
             # Get active sessions from optimizer
-            # This is a placeholder - would need actual data from PerformanceMonitor
+            if hasattr(self.optimizer, 'performance_monitor'):
+                # Get all active sessions
+                active_sessions = self.optimizer.performance_monitor.active_sessions
+                
+                if active_sessions:
+                    # Get data from first active session (or could cycle through all)
+                    pid = list(active_sessions.keys())[0]
+                    summary = self.optimizer.performance_monitor.get_session_summary(pid)
+                    
+                    if summary and 'frame_time_p99' in summary:
+                        frame_time_p99 = summary['frame_time_p99']
+                        
+                        # Add to history (keep last 60 readings)
+                        self.frame_time_history.append(frame_time_p99)
+                        if len(self.frame_time_history) > 60:
+                            self.frame_time_history.pop(0)
+                        
+                        # Update graph
+                        self.ax_frametime.clear()
+                        self.ax_frametime.set_title("Frame Time P99 (Last 60 readings)", fontsize=12, fontweight='bold')
+                        self.ax_frametime.set_ylabel("Frame Time (ms)", fontsize=10)
+                        self.ax_frametime.set_xlabel("Reading #", fontsize=10)
+                        self.ax_frametime.grid(True, alpha=0.3)
+                        
+                        # Plot with color gradient based on performance
+                        x = list(range(len(self.frame_time_history)))
+                        y = self.frame_time_history
+                        
+                        # Color: green for good (<20ms), yellow for ok (20-33ms), red for bad (>33ms)
+                        colors = []
+                        for val in y:
+                            if val < 20:
+                                colors.append('green')
+                            elif val < 33:
+                                colors.append('orange')
+                            else:
+                                colors.append('red')
+                        
+                        self.ax_frametime.plot(x, y, linewidth=2, color='blue', marker='o', markersize=4)
+                        self.ax_frametime.axhline(y=16.67, color='green', linestyle='--', alpha=0.5, label='60 FPS (16.67ms)')
+                        self.ax_frametime.axhline(y=33.33, color='orange', linestyle='--', alpha=0.5, label='30 FPS (33.33ms)')
+                        self.ax_frametime.legend(loc='upper right')
+                        
+                        # Add current value annotation
+                        if y:
+                            self.ax_frametime.annotate(f'{y[-1]:.2f}ms', 
+                                                       xy=(len(y)-1, y[-1]),
+                                                       xytext=(10, 10),
+                                                       textcoords='offset points',
+                                                       fontsize=10,
+                                                       bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.7))
+                        
+                        self.canvas.draw()
             
             # Update every 1 second
             self.root.after(1000, self._update_monitoring_graphs)
             
         except Exception as e:
             logger.debug(f"Graph update error: {e}")
+            # Continue updating even on errors
+            self.root.after(1000, self._update_monitoring_graphs)
     
     def _export_telemetry(self):
         """Export telemetry to file"""
@@ -486,7 +542,7 @@ class GameOptimizerGUI:
         threading.Thread(target=train, daemon=True).start()
     
     def _show_ml_recommendations(self):
-        """Show ML recommendations for all games"""
+        """Show ML recommendations for all games with confidence scores"""
         if not self.optimizer or not hasattr(self.optimizer, 'ml_tuner'):
             messagebox.showwarning("Not Available", "ML tuner not initialized")
             return
@@ -494,29 +550,88 @@ class GameOptimizerGUI:
         try:
             recommendations_window = tk.Toplevel(self.root)
             recommendations_window.title("ML Recommendations")
-            recommendations_window.geometry("600x400")
+            recommendations_window.geometry("700x500")
             
-            text_widget = tk.Text(recommendations_window, wrap=tk.WORD, width=70, height=20)
+            # Create text widget with tags for colored confidence
+            text_widget = tk.Text(recommendations_window, wrap=tk.WORD, width=80, height=25, font=('Courier', 10))
             text_widget.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
             
-            text_widget.insert(tk.END, "ML Recommendations for Your Games:\n\n")
+            # Configure tags for confidence colors
+            text_widget.tag_config('confidence_high', foreground='green', font=('Courier', 10, 'bold'))
+            text_widget.tag_config('confidence_medium', foreground='orange', font=('Courier', 10, 'bold'))
+            text_widget.tag_config('confidence_low', foreground='red', font=('Courier', 10, 'bold'))
+            text_widget.tag_config('header', font=('Courier', 12, 'bold'))
+            
+            text_widget.insert(tk.END, "ML Recommendations for Your Games\n", 'header')
+            text_widget.insert(tk.END, "=" * 70 + "\n\n")
             
             has_recommendations = False
             
             for game_exe in self.config_manager.game_profiles.keys():
-                profile = self.optimizer.ml_tuner.get_optimized_profile(game_exe)
+                # Get ML profile with confidence score
+                result = self.optimizer.ml_tuner.generate_ml_profile(game_exe)
                 
-                if profile:
+                if result:
+                    # Check if result is a tuple (profile, confidence)
+                    if isinstance(result, tuple) and len(result) == 2:
+                        profile, confidence = result
+                    else:
+                        # Legacy support: just profile, no confidence
+                        profile = result
+                        confidence = 0.5  # Default medium confidence
+                    
                     has_recommendations = True
-                    text_widget.insert(tk.END, f"• {game_exe}:\n")
+                    
+                    # Game header
+                    text_widget.insert(tk.END, f"🎮 {game_exe}\n")
+                    text_widget.insert(tk.END, "-" * 70 + "\n")
+                    
+                    # Confidence score with color coding
+                    confidence_pct = confidence * 100
+                    text_widget.insert(tk.END, "  Confidence: ")
+                    
+                    if confidence >= 0.75:
+                        confidence_tag = 'confidence_high'
+                        confidence_icon = "✓✓✓"
+                        risk_level = "Low Risk"
+                    elif confidence >= 0.50:
+                        confidence_tag = 'confidence_medium'
+                        confidence_icon = "✓✓"
+                        risk_level = "Medium Risk"
+                    else:
+                        confidence_tag = 'confidence_low'
+                        confidence_icon = "✓"
+                        risk_level = "High Risk"
+                    
+                    text_widget.insert(tk.END, f"{confidence_pct:.1f}% {confidence_icon} ({risk_level})\n", confidence_tag)
+                    
+                    # Profile details
                     text_widget.insert(tk.END, f"  Profile: {profile.name}\n")
-                    text_widget.insert(tk.END, f"  GPU Clock Locking: {profile.gpu_clock_locking}\n")
-                    text_widget.insert(tk.END, f"  Core Parking: {'Disabled' if profile.disable_core_parking else 'Enabled'}\n")
-                    text_widget.insert(tk.END, f"  Memory Level: {profile.memory_optimization_level}\n\n")
+                    text_widget.insert(tk.END, f"  GPU Clock Locking: {'✓ Yes' if profile.gpu_clock_locking else '✗ No'}\n")
+                    text_widget.insert(tk.END, f"  Core Parking: {'✓ Disabled' if profile.disable_core_parking else '✗ Enabled'}\n")
+                    text_widget.insert(tk.END, f"  Memory Level: {profile.memory_optimization_level}\n")
+                    text_widget.insert(tk.END, f"  Timer Resolution: {profile.timer_resolution_ms}ms\n")
+                    text_widget.insert(tk.END, f"  CPU Priority: {profile.cpu_priority_class}\n")
+                    
+                    # Network optimizations
+                    if hasattr(profile, 'disable_nagle') and profile.disable_nagle:
+                        text_widget.insert(tk.END, f"  TCP Latency Opts: ✓ Enabled (Nagle disabled)\n")
+                    if hasattr(profile, 'tcp_buffer_tuning') and profile.tcp_buffer_tuning:
+                        text_widget.insert(tk.END, f"  TCP Buffer Tuning: ✓ Enabled\n")
+                    
+                    text_widget.insert(tk.END, "\n")
             
             if not has_recommendations:
                 text_widget.insert(tk.END, "No recommendations available yet.\n")
-                text_widget.insert(tk.END, "Play games with optimization enabled to collect training data.")
+                text_widget.insert(tk.END, "Play games with optimization enabled to collect training data.\n\n")
+                text_widget.insert(tk.END, "Tip: The ML model needs at least 10 gaming sessions to make predictions.")
+            
+            # Make text widget read-only
+            text_widget.config(state=tk.DISABLED)
+            
+        except Exception as e:
+            logger.error(f"Error showing ML recommendations: {e}", exc_info=True)
+            messagebox.showerror("Error", f"Failed to show recommendations: {e}")
             
             text_widget.config(state=tk.DISABLED)
             

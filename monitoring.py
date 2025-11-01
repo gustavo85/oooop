@@ -85,6 +85,9 @@ class SessionTelemetry:
     
     # NEW: Rollback tracking for ML training
     optimization_failed: bool = False
+    
+    # NEW: Memory pressure tracking
+    memory_pressure_pct: float = 0.0  # Percentage of total RAM being used
 
 
 class PerformanceMonitor:
@@ -410,6 +413,17 @@ class PerformanceMonitor:
                     'gpu_temp_avg': statistics.mean(session['gpu_temp_samples']) if session['gpu_temp_samples'] else 0,
                 }
                 
+                # Calculate memory pressure percentage
+                try:
+                    total_ram_mb = psutil.virtual_memory().total / (1024 * 1024)
+                    memory_used_mb = summary['memory_mb_avg']
+                    if total_ram_mb > 0:
+                        summary['memory_pressure_pct'] = (memory_used_mb / total_ram_mb) * 100
+                    else:
+                        summary['memory_pressure_pct'] = 0.0
+                except Exception:
+                    summary['memory_pressure_pct'] = 0.0
+                
                 # Store baseline for alerts if not set
                 if session.get('baseline_frame_time_p999') is None:
                     session['baseline_frame_time_p999'] = frame_time_p999
@@ -537,6 +551,18 @@ class TelemetryCollector:
                 session_data['cpu_temp_avg'] = performance_metrics.get('cpu_temp_avg', 0.0)
                 session_data['gpu_temp_avg'] = performance_metrics.get('gpu_temp_avg', 0.0)
                 session_data['frame_time_p999_ms'] = performance_metrics.get('frame_time_p999', 0.0)
+                
+                # Calculate memory pressure percentage
+                try:
+                    import psutil
+                    total_ram_mb = psutil.virtual_memory().total / (1024 * 1024)
+                    memory_used_mb = performance_metrics.get('memory_mb_avg', 0.0)
+                    if total_ram_mb > 0:
+                        session_data['memory_pressure_pct'] = (memory_used_mb / total_ram_mb) * 100
+                    else:
+                        session_data['memory_pressure_pct'] = 0.0
+                except Exception:
+                    session_data['memory_pressure_pct'] = 0.0
             else:
                 # Use placeholders if no metrics provided
                 session_data['frame_metrics'] = None
@@ -551,6 +577,7 @@ class TelemetryCollector:
                 session_data['cpu_temp_avg'] = 0.0
                 session_data['gpu_temp_avg'] = 0.0
                 session_data['frame_time_p999_ms'] = 0.0
+                session_data['memory_pressure_pct'] = 0.0
             
             # Track rollback status
             session_data['optimization_failed'] = optimization_failed

@@ -67,6 +67,7 @@ class NetworkOptimizer:
         self.network_metrics: Dict[int, NetworkMetrics] = {}
         self.lock = threading.Lock()  # NEW: Thread-safety
         self.numa_topology: Dict[int, NUMANodeInfo] = {}
+        self.tcp_settings_modified: Dict[str, Dict[str, Any]] = {}  # Store original TCP settings
         
         self._load_network_dlls()
         self._setup_icmp()
@@ -545,8 +546,195 @@ class NetworkOptimizer:
         # Kept for compatibility, but global tuning disabled by default
         return True
     
+    def disable_tcp_latency_algorithms(self) -> bool:
+        """
+        Disable Nagle's Algorithm and TCP Delayed Acknowledgment for lower latency.
+        
+        Modifies registry keys:
+        - TcpNoDelay = 1 (disables Nagle's algorithm)
+        - TcpAckFrequency = 1 (disables delayed ACK)
+        
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        import winreg
+        
+        try:
+            # Get all network interface GUIDs
+            interfaces_path = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
+            
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, interfaces_path, 0, 
+                              winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as interfaces_key:
+                
+                # Enumerate all subkeys (interface GUIDs)
+                num_interfaces = winreg.QueryInfoKey(interfaces_key)[0]
+                
+                modified_count = 0
+                
+                for i in range(num_interfaces):
+                    try:
+                        interface_guid = winreg.EnumKey(interfaces_key, i)
+                        interface_path = f"{interfaces_path}\\{interface_guid}"
+                        
+                        # Try to open the interface key for modification
+                        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, interface_path, 0,
+                                          winreg.KEY_READ | winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as iface_key:
+                            
+                            # Store original values for rollback
+                            if interface_guid not in self.tcp_settings_modified:
+                                original_values = {}
+                                
+                                for value_name in ['TcpNoDelay', 'TcpAckFrequency']:
+                                    try:
+                                        original_val, _ = winreg.QueryValueEx(iface_key, value_name)
+                                        original_values[value_name] = original_val
+                                    except FileNotFoundError:
+                                        original_values[value_name] = None  # Value didn't exist
+                                
+                                self.tcp_settings_modified[interface_guid] = original_values
+                            
+                            # Set TcpNoDelay = 1 (disable Nagle's algorithm)
+                            winreg.SetValueEx(iface_key, 'TcpNoDelay', 0, winreg.REG_DWORD, 1)
+                            
+                            # Set TcpAckFrequency = 1 (disable delayed ACK)
+                            winreg.SetValueEx(iface_key, 'TcpAckFrequency', 0, winreg.REG_DWORD, 1)
+                            
+                            modified_count += 1
+                            
+                    except Exception as e:
+                        logger.debug(f"Could not modify interface {interface_guid}: {e}")
+                        continue
+                
+                if modified_count > 0:
+                    logger.info(f"✓ TCP latency algorithms disabled on {modified_count} interfaces (Nagle & Delayed ACK)")
+                    return True
+                else:
+                    logger.warning("No network interfaces modified for TCP latency optimization")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Failed to disable TCP latency algorithms: {e}")
+            return False
+    
+    def set_network_buffers(self, receive_window_kb: int = 256, send_window_kb: int = 256) -> bool:
+        """
+        Adjust TCP receive and send window sizes for better bandwidth utilization.
+        
+        Args:
+            receive_window_kb: Receive window size in KB (default: 256KB)
+            send_window_kb: Send window size in KB (default: 256KB)
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        import winreg
+        
+        try:
+            tcp_params_path = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+            
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, tcp_params_path, 0,
+                              winreg.KEY_READ | winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as key:
+                
+                # Store original values if not already stored
+                if 'TcpParameters' not in self.tcp_settings_modified:
+                    original_values = {}
+                    
+                    for value_name in ['DefaultRcvWindow', 'DefaultSendWindow']:
+                        try:
+                            original_val, _ = winreg.QueryValueEx(key, value_name)
+                            original_values[value_name] = original_val
+                        except FileNotFoundError:
+                            original_values[value_name] = None
+                    
+                    self.tcp_settings_modified['TcpParameters'] = original_values
+                
+                # Convert KB to bytes
+                receive_window_bytes = receive_window_kb * 1024
+                send_window_bytes = send_window_kb * 1024
+                
+                # Set DefaultRcvWindow
+                winreg.SetValueEx(key, 'DefaultRcvWindow', 0, winreg.REG_DWORD, receive_window_bytes)
+                
+                # Set DefaultSendWindow
+                winreg.SetValueEx(key, 'DefaultSendWindow', 0, winreg.REG_DWORD, send_window_bytes)
+                
+                logger.info(f"✓ TCP buffers optimized (RcvWindow={receive_window_kb}KB, SendWindow={send_window_kb}KB)")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to set network buffers: {e}")
+            return False
+    
+    def _restore_tcp_settings(self):
+        """Restore original TCP settings (called during cleanup)"""
+        import winreg
+        
+        try:
+            # Restore interface-specific settings
+            interfaces_path = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
+            
+            for interface_guid, original_values in self.tcp_settings_modified.items():
+                if interface_guid == 'TcpParameters':
+                    continue  # Handle separately
+                
+                try:
+                    interface_path = f"{interfaces_path}\\{interface_guid}"
+                    
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, interface_path, 0,
+                                      winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as iface_key:
+                        
+                        for value_name, original_val in original_values.items():
+                            try:
+                                if original_val is None:
+                                    # Value didn't exist before, delete it
+                                    try:
+                                        winreg.DeleteValue(iface_key, value_name)
+                                    except FileNotFoundError:
+                                        pass
+                                else:
+                                    # Restore original value
+                                    winreg.SetValueEx(iface_key, value_name, 0, winreg.REG_DWORD, original_val)
+                            except Exception as e:
+                                logger.debug(f"Could not restore {value_name} on {interface_guid}: {e}")
+                                
+                except Exception as e:
+                    logger.debug(f"Could not restore interface {interface_guid}: {e}")
+            
+            # Restore global TCP parameters
+            if 'TcpParameters' in self.tcp_settings_modified:
+                try:
+                    tcp_params_path = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+                    
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, tcp_params_path, 0,
+                                      winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as key:
+                        
+                        for value_name, original_val in self.tcp_settings_modified['TcpParameters'].items():
+                            try:
+                                if original_val is None:
+                                    try:
+                                        winreg.DeleteValue(key, value_name)
+                                    except FileNotFoundError:
+                                        pass
+                                else:
+                                    winreg.SetValueEx(key, value_name, 0, winreg.REG_DWORD, original_val)
+                            except Exception as e:
+                                logger.debug(f"Could not restore {value_name}: {e}")
+                                
+                except Exception as e:
+                    logger.debug(f"Could not restore TCP parameters: {e}")
+            
+            if self.tcp_settings_modified:
+                logger.info("✓ TCP settings restored to original values")
+                self.tcp_settings_modified.clear()
+                
+        except Exception as e:
+            logger.error(f"Error restoring TCP settings: {e}")
+    
     def cleanup(self):
         """Cleanup all network optimizations"""
         with self.lock:
             for pid in list(self.optimized_processes):
                 self.remove_qos_policy(pid)
+            
+            # Restore TCP settings
+            self._restore_tcp_settings()

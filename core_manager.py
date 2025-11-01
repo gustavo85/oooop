@@ -718,10 +718,16 @@ class GameOptimizer:
                 logger.info(f"No profile found for '{game_exe}', checking ML recommendations...")
                 
                 # Try ML auto-tune
-                ml_profile = self.ml_tuner.get_optimized_profile(game_exe)
-                if ml_profile:
-                    profile = ml_profile
-                    logger.info(f"✓ Using ML-optimized profile")
+                ml_result = self.ml_tuner.get_optimized_profile(game_exe)
+                if ml_result:
+                    # Handle tuple return (profile, confidence)
+                    if isinstance(ml_result, tuple) and len(ml_result) == 2:
+                        profile, confidence = ml_result
+                        logger.info(f"✓ Using ML-optimized profile (confidence: {confidence*100:.1f}%)")
+                    else:
+                        # Legacy: just profile
+                        profile = ml_result
+                        logger.info(f"✓ Using ML-optimized profile")
                 else:
                     logger.info("Using default competitive profile")
                     profile = GameProfile(
@@ -849,6 +855,18 @@ class GameOptimizer:
                 if self.network_optimizer.optimize_network_adapter():
                     state.optimizations_applied.add('network_adapter')
                     logger.info("✓ Network adapter optimized")
+                
+                # TCP latency optimizations
+                if getattr(profile, 'disable_nagle', False):
+                    if self.network_optimizer.disable_tcp_latency_algorithms():
+                        state.optimizations_applied.add('tcp_latency_disabled')
+                        logger.info("✓ TCP latency algorithms disabled (Nagle & Delayed ACK)")
+                
+                # TCP buffer tuning
+                if getattr(profile, 'tcp_buffer_tuning', False):
+                    if self.network_optimizer.set_network_buffers(receive_window_kb=256, send_window_kb=256):
+                        state.optimizations_applied.add('tcp_buffers_tuned')
+                        logger.info("✓ TCP network buffers optimized")
                 
                 # NIC RSS affinity
                 if getattr(profile, 'nic_rss_auto', True):
@@ -1123,6 +1141,21 @@ class GameOptimizer:
                 session_age = current_time - session_start_times.get(pid, current_time)
                 if session_age < 30:
                     continue
+                
+                # Check memory pressure and purge if needed
+                try:
+                    session_summary = self.performance_monitor.get_session_summary(pid)
+                    if session_summary:
+                        memory_pressure = session_summary.get('memory_pressure_pct', 0.0)
+                        
+                        # Proactive memory purging when pressure exceeds 85%
+                        if memory_pressure > 85.0:
+                            logger.info(f"⚠️  High memory pressure detected: {memory_pressure:.1f}%")
+                            if self.memory_optimizer.purge_standby_memory_adaptive(
+                                min_interval=30, threshold_percent=85.0):
+                                logger.info(f"✓ Proactive memory purge completed (pressure: {memory_pressure:.1f}%)")
+                except Exception as e:
+                    logger.debug(f"Memory pressure check error for PID {pid}: {e}")
                 
                 # Check if critical performance degradation detected
                 if self.performance_monitor.check_critical_alerts(pid):
