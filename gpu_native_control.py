@@ -6,7 +6,15 @@ Supports:
 1. NVIDIA GPUs via NVAPI (nvapi64.dll)
 2. AMD GPUs via ADL (atiadlxx.dll)
 
-This replaces nvidia-smi and registry-based approaches with direct API calls.
+This replaces nvidia-smi and registry-based approaches with direct API calls
+for better performance, reliability, and lower overhead.
+
+Architecture:
+- NVAPIWrapper: NVIDIA NVAPI binding for P-state control
+- ADLWrapper: AMD Display Library binding for Overdrive control  
+- NativeGPUController: Unified interface for both vendors
+
+Type Hints Added: V4.0
 """
 
 import ctypes
@@ -17,7 +25,7 @@ from typing import Optional, Tuple, Dict, Any
 from dataclasses import dataclass
 from enum import IntEnum
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 # ============================================================================

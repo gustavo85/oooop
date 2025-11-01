@@ -9,6 +9,8 @@ This module replaces the placeholder implementations with actual ETW consumers f
 Provider GUIDs:
 - Microsoft-Windows-DXGI: {CA11C036-0102-4A2D-A6AD-F03CFED5D3C9}
 - NT Kernel Logger: {9E814AAD-3204-11D2-9A82-006008A86939}
+
+Type Hints Added: V4.0
 """
 
 import ctypes
@@ -21,7 +23,7 @@ from collections import deque
 from dataclasses import dataclass
 import struct
 
-logger = logging.getLogger(__name__)
+logger: logging.Logger = logging.getLogger(__name__)
 
 # ETW Constants
 ERROR_SUCCESS = 0
@@ -133,34 +135,67 @@ EVENT_TRACE_LOGFILE._fields_ = [
 
 @dataclass
 class FrameTimeData:
-    """Frame time data from DXGI Present events"""
-    timestamp: float  # QPC time
+    """
+    Frame time data from DXGI Present events.
+    
+    Attributes:
+        timestamp: High-precision QPC timestamp in seconds
+        frame_time_ms: Frame time in milliseconds
+        present_flags: DXGI present flags from the event
+    """
+    timestamp: float
     frame_time_ms: float
     present_flags: int
 
 
 @dataclass
 class DPCLatencyData:
-    """DPC/ISR latency data from kernel events"""
+    """
+    DPC/ISR latency data from kernel events.
+    
+    Attributes:
+        timestamp: Event timestamp
+        latency_us: Latency in microseconds
+        is_dpc: True if DPC event, False if ISR event
+        driver_object: Optional driver object pointer from kernel event
+    """
     timestamp: float
     latency_us: float
-    is_dpc: bool  # True=DPC, False=ISR
+    is_dpc: bool
     driver_object: Optional[int] = None
 
 
 class ETWFrameTimeMonitor:
     """
     Real ETW-based frame time monitor using Microsoft-Windows-DXGI provider.
-    Captures actual Present events from the DXGI swap chain.
+    
+    Captures actual Present events from the DXGI swap chain to provide accurate
+    frame time measurements. This replaces QPC-based frame time estimation with
+    real GPU pipeline data.
+    
+    The monitor uses Event Tracing for Windows (ETW) to subscribe to the
+    Microsoft-Windows-DXGI provider and capture Present events (Event ID 16).
+    
+    Attributes:
+        advapi32: Windows advapi32.dll for ETW functions
+        kernel32: Windows kernel32.dll for QPC functions
+        session_handle: ETW session handle
+        trace_handle: ETW trace handle for event processing
+        monitoring: Flag indicating if monitoring is active
+        monitor_thread: Background thread for event processing
+        frame_times: Deque of collected frame time data
+        last_present_time: Timestamp of last Present event
+        qpc_freq_val: QueryPerformanceCounter frequency
     """
     
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize ETW frame time monitor with QPC calibration."""
         self.advapi32 = ctypes.windll.advapi32
         self.kernel32 = ctypes.windll.kernel32
         
         self.session_handle: Optional[int] = None
         self.trace_handle: Optional[int] = None
-        self.monitoring = False
+        self.monitoring: bool = False
         self.monitor_thread: Optional[threading.Thread] = None
         
         self.frame_times: Deque[FrameTimeData] = deque(maxlen=10000)
@@ -169,13 +204,28 @@ class ETWFrameTimeMonitor:
         # Performance counter frequency
         self.qpc_freq = wintypes.LARGE_INTEGER()
         self.kernel32.QueryPerformanceFrequency(ctypes.byref(self.qpc_freq))
-        self.qpc_freq_val = self.qpc_freq.value
+        self.qpc_freq_val: int = self.qpc_freq.value
         
         # Keep callback reference to prevent garbage collection
-        self._event_callback = None
+        self._event_callback: Optional[EVENT_RECORD_CALLBACK] = None
     
     def start(self, session_name: str = "DXGIFrameTimeSession") -> bool:
-        """Start ETW trace session for DXGI Present events"""
+        """
+        Start ETW trace session for DXGI Present events.
+        
+        Creates an ETW session, enables the Microsoft-Windows-DXGI provider,
+        and starts background event processing.
+        
+        Args:
+            session_name: Name for the ETW session (must be unique)
+            
+        Returns:
+            True if session started successfully, False otherwise
+            
+        Note:
+            Requires administrator privileges. If a session with the same
+            name exists, it will be stopped and restarted.
+        """
         if self.monitoring:
             return False
         
